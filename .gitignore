@@ -25,3 +25,15 @@ dist-ssr
 
 # Fichiers volumineux à ignorer
 =.git
+
+# Backups et exports
+*.zip
+backups/
+sama-front-export_*.zip
+
+# Fichiers PHP de test (si présents)
+index.php
+
+# Fichiers de build
+dist/
+build/
