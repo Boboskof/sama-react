@@ -1,0 +1,36 @@
+/* Styles personnalisés pour l'application SAMA */
+/* La plupart des styles sont gérés par Tailwind CSS */
+
+/* Couleurs de fond personnalisées */
+:root {
+  --bg-light-blue: #dbeafe; /* bg-blue-100 */
+  --bg-dark-blue: #103870; /* slate-600 - bleu-gris */
+  --bg-content-blue: #1354af; /* slate-500 - bleu-gris plus clair */
+  
+  /* Couleurs orange pour Patients */
+  --bg-light-orange: #fed7aa; /* bg-orange-100 - couleur du menu */
+  --bg-dark-orange: #ea580c; /* orange-600 - plus foncé */
+  --bg-content-orange: #fb923c; /* orange-400 - intermédiaire */
+}
+
+/* Fond général de l'application - géré dynamiquement par React */
+
+/* Fond des sections principales */
+.bg-content-blue {
+  background-color: var(--bg-content-blue);
+}
+
+.bg-content-orange {
+  background-color: var(--bg-content-orange);
+}
+
+.bg-card-orange {
+  background-color: var(--bg-dark-orange);
+}
+
+/* Fond des cartes et contenus */
+.bg-card-blue {
+  background-color: var(--bg-dark-blue);
+}
+
+/* Styles pour les composants personnalisés si nécessaire */

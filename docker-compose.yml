@@ -1,0 +1,24 @@
+services:
+  # MailHog pour simuler les envois d'emails
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: mailhog
+    ports:
+      - "1025:1025"  # Port SMTP
+      - "8025:8025"  # Interface web MailHog
+    environment:
+      - MH_STORAGE=maildir
+      - MH_MAILDIR_PATH=/maildir
+    volumes:
+      - mailhog_data:/maildir
+    networks:
+      - app-network
+
+volumes:
+  mailhog_data:
+
+networks:
+  app-network:
+    driver: bridge
+
+

@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+
+    // Migration JS -> TS
+    "allowJs": true,
+
+    // Types & libs
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+
+    // Aliases
+    "baseUrl": "src"
+    // "paths": { "@/*": ["*"] } // (optionnel) si tu veux importer avec "@/..."
+  },
+  "include": ["src"]
+}

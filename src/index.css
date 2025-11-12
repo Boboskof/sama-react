@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+/* Fix text-size-adjust support across browsers (Chrome/Edge/Safari/Firefox) */
+@layer base {
+  html, :host {
+    text-size-adjust: 100%;
+    -webkit-text-size-adjust: 100%;
+  }
+}
+
+/* Reset et styles de base */
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+/* Variables CSS personnalisées */
+:root {
+  --bg-light-blue: #dbeafe;
+  --bg-dark-blue: #103870;
+  --bg-content-blue: #1354af;
+  --bg-light-orange: #fed7aa;
+  --bg-dark-orange: #ea580c;
+  --bg-content-orange: #fb923c;
+  --bg-content-pink: #ec4899;
+  --bg-content-purple: #a855f7;
+  --bg-content-green: #22c55e;
+}
+
+/* Classes CSS personnalisées pour les couleurs de fond */
+.bg-content-blue {
+  background-color: var(--bg-content-blue);
+}
+
+.bg-content-orange {
+  background-color: var(--bg-content-orange);
+}
+
+.bg-content-pink {
+  background-color: var(--bg-content-pink);
+}
+
+.bg-content-purple {
+  background-color: var(--bg-content-purple);
+}
+
+.bg-content-green {
+  background-color: var(--bg-content-green);
+}
