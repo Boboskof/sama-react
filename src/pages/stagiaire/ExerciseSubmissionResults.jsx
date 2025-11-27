@@ -151,6 +151,27 @@ const ExerciseSubmissionResults = () => {
                 )}
               </div>
 
+              {/* Bonnes réponses si la réponse est incorrecte */}
+              {answer.autoScore < answer.question.maxScore && 
+               answer.question.config?.correctAnswers && 
+               answer.question.config.correctAnswers.length > 0 &&
+               answer.question.type !== 'TEXTE' && (
+                <div className="bg-green-50 border border-green-200 rounded-lg p-3 mb-3">
+                  <p className="text-xs font-semibold text-green-900 mb-1">✓ Bonne(s) réponse(s) :</p>
+                  <div className="text-sm text-green-800">
+                    {Array.isArray(answer.question.config.correctAnswers) ? (
+                      <ul className="list-disc list-inside space-y-1">
+                        {answer.question.config.correctAnswers.map((correctAnswer, idx) => (
+                          <li key={idx}>{correctAnswer}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p>{answer.question.config.correctAnswers}</p>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {/* Commentaire du formateur sur cette réponse */}
               {answer.trainerComment && (
                 <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
