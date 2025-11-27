@@ -103,11 +103,13 @@ const ExerciseSubmissionReview = () => {
 
     setUiError(null);
 
-    // Vérifier que toutes les questions TEXTE ont un score défini
+    // Vérifier que toutes les questions TEXTE ont un score défini (peut être 0 mais doit être défini)
     const texteQuestionsWithoutScore = sortedAnswers.filter(answer => {
       const isTextQuestion = answer.question.type === 'TEXTE' || answer.question.type === 'TEXTE_LIBRE';
+      if (!isTextQuestion) return false;
       const adjustedScore = answerScores[answer.id];
-      return isTextQuestion && (adjustedScore === undefined || adjustedScore === null);
+      // Le score doit être défini (peut être 0, mais pas undefined ou null)
+      return adjustedScore === undefined || adjustedScore === null;
     });
 
     if (texteQuestionsWithoutScore.length > 0) {
@@ -116,6 +118,7 @@ const ExerciseSubmissionReview = () => {
     }
 
     // Construire le tableau des réponses avec commentaires et scores ajustés
+    // Selon la documentation : toutes les questions TEXTE doivent être incluses avec autoScore
     const answers = sortedAnswers
       .map((answer) => {
         const comment = answerComments[answer.id];
@@ -123,18 +126,27 @@ const ExerciseSubmissionReview = () => {
         const originalScore = answer.autoScore ?? 0;
         const isTextQuestion = answer.question.type === 'TEXTE' || answer.question.type === 'TEXTE_LIBRE';
         
-        // Pour les questions TEXTE, toujours inclure le score (obligatoire)
-        // Pour les autres, inclure seulement si modifié ou si commentaire
+        // Pour les questions TEXTE : TOUJOURS inclure le score (obligatoire)
+        // Pour les autres : inclure seulement si modifié ou si commentaire
         const hasComment = comment?.trim();
-        const hasAdjustedScore = adjustedScore !== undefined && (isTextQuestion || adjustedScore !== originalScore);
         
-        if (hasComment || hasAdjustedScore) {
+        if (isTextQuestion) {
+          // Question TEXTE : toujours inclure avec autoScore (obligatoire)
           return {
             answerId: answer.id,
+            autoScore: adjustedScore !== undefined ? adjustedScore : originalScore,
             ...(hasComment ? { trainerComment: comment.trim() } : {}),
-            // Toujours envoyer le score si c'est une question TEXTE ou si le score a été ajusté
-            ...(hasAdjustedScore ? { autoScore: adjustedScore } : {}),
           };
+        } else {
+          // Question QCM/CASE_A_COCHER : inclure seulement si modifié ou si commentaire
+          const hasAdjustedScore = adjustedScore !== undefined && adjustedScore !== originalScore;
+          if (hasComment || hasAdjustedScore) {
+            return {
+              answerId: answer.id,
+              ...(hasComment ? { trainerComment: comment.trim() } : {}),
+              ...(hasAdjustedScore ? { autoScore: adjustedScore } : {}),
+            };
+          }
         }
         return null;
       })
