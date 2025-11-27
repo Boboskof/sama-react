@@ -1,0 +1,234 @@
+/* Styles d'accessibilité pour SAMA */
+
+/* ============================================
+   TAILLE DU TEXTE
+   ============================================ */
+
+/* Taille de base pour le body */
+body {
+  font-size: var(--accessibility-font-size, 1rem);
+}
+
+/* Classes pour différentes tailles de texte */
+.font-size-small {
+  font-size: 0.875rem; /* 14px */
+}
+
+.font-size-small * {
+  font-size: inherit;
+}
+
+.font-size-medium {
+  font-size: 1rem; /* 16px - défaut */
+}
+
+.font-size-medium * {
+  font-size: inherit;
+}
+
+.font-size-large {
+  font-size: 1.125rem; /* 18px */
+}
+
+.font-size-large * {
+  font-size: inherit;
+}
+
+.font-size-extra-large {
+  font-size: 1.25rem; /* 20px */
+}
+
+.font-size-extra-large * {
+  font-size: inherit;
+}
+
+/* Ajustements spécifiques pour les éléments importants */
+.font-size-small h1 { font-size: 1.5rem; }
+.font-size-small h2 { font-size: 1.25rem; }
+.font-size-small h3 { font-size: 1.125rem; }
+
+.font-size-medium h1 { font-size: 1.875rem; }
+.font-size-medium h2 { font-size: 1.5rem; }
+.font-size-medium h3 { font-size: 1.25rem; }
+
+.font-size-large h1 { font-size: 2.25rem; }
+.font-size-large h2 { font-size: 1.875rem; }
+.font-size-large h3 { font-size: 1.5rem; }
+
+.font-size-extra-large h1 { font-size: 2.5rem; }
+.font-size-extra-large h2 { font-size: 2rem; }
+.font-size-extra-large h3 { font-size: 1.75rem; }
+
+/* ============================================
+   CONTRASTE ÉLEVÉ
+   ============================================ */
+
+.high-contrast {
+  /* Forcer des contrastes élevés */
+  --contrast-text: #000000;
+  --contrast-bg: #ffffff;
+  --contrast-border: #000000;
+  --contrast-focus: #0000ff;
+}
+
+.high-contrast body {
+  background-color: var(--contrast-bg) !important;
+  color: var(--contrast-text) !important;
+}
+
+/* Textes en contraste élevé */
+.high-contrast p,
+.high-contrast span,
+.high-contrast div,
+.high-contrast label,
+.high-contrast td,
+.high-contrast th {
+  color: var(--contrast-text) !important;
+}
+
+/* Bordures visibles */
+.high-contrast button,
+.high-contrast input,
+.high-contrast select,
+.high-contrast textarea,
+.high-contrast a {
+  border: 2px solid var(--contrast-border) !important;
+}
+
+/* Boutons avec contraste élevé */
+.high-contrast button {
+  background-color: var(--contrast-bg) !important;
+  color: var(--contrast-text) !important;
+  border: 2px solid var(--contrast-border) !important;
+}
+
+.high-contrast button:hover,
+.high-contrast button:focus {
+  background-color: var(--contrast-text) !important;
+  color: var(--contrast-bg) !important;
+}
+
+/* Liens avec contraste élevé */
+.high-contrast a {
+  color: #0000ff !important;
+  text-decoration: underline !important;
+}
+
+.high-contrast a:hover,
+.high-contrast a:focus {
+  background-color: #ffff00 !important;
+  color: #000000 !important;
+}
+
+/* Inputs avec contraste élevé */
+.high-contrast input,
+.high-contrast select,
+.high-contrast textarea {
+  background-color: var(--contrast-bg) !important;
+  color: var(--contrast-text) !important;
+  border: 2px solid var(--contrast-border) !important;
+}
+
+.high-contrast input:focus,
+.high-contrast select:focus,
+.high-contrast textarea:focus {
+  outline: 3px solid var(--contrast-focus) !important;
+  outline-offset: 2px !important;
+}
+
+/* Cartes et conteneurs */
+.high-contrast .bg-white,
+.high-contrast .bg-gray-50,
+.high-contrast .bg-blue-100,
+.high-contrast .bg-orange-100,
+.high-contrast .bg-pink-100,
+.high-contrast .bg-green-100,
+.high-contrast .bg-purple-100,
+.high-contrast .bg-indigo-100 {
+  background-color: var(--contrast-bg) !important;
+  border: 2px solid var(--contrast-border) !important;
+}
+
+/* ============================================
+   NAVIGATION CLAVIER - FOCUS VISIBLE
+   ============================================ */
+
+/* Focus visible pour tous les éléments interactifs */
+.keyboard-navigation *:focus,
+.keyboard-navigation button:focus,
+.keyboard-navigation a:focus,
+.keyboard-navigation input:focus,
+.keyboard-navigation select:focus,
+.keyboard-navigation textarea:focus {
+  outline: 3px solid #0066cc !important;
+  outline-offset: 2px !important;
+  box-shadow: 0 0 0 2px #ffffff, 0 0 0 5px #0066cc !important;
+}
+
+/* Focus pour les éléments avec contraste élevé */
+.high-contrast.keyboard-navigation *:focus {
+  outline: 4px solid #ffff00 !important;
+  outline-offset: 3px !important;
+  box-shadow: 0 0 0 2px #000000, 0 0 0 6px #ffff00 !important;
+}
+
+/* Améliorer la visibilité du focus sur les boutons */
+.keyboard-navigation button:focus {
+  transform: scale(1.02);
+  transition: transform 0.1s ease;
+}
+
+/* Skip link pour navigation au clavier */
+.skip-link {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: #000000;
+  color: #ffffff;
+  padding: 8px;
+  text-decoration: none;
+  z-index: 100;
+}
+
+.skip-link:focus {
+  top: 0;
+}
+
+/* ============================================
+   AMÉLIORATIONS GÉNÉRALES
+   ============================================ */
+
+/* S'assurer que les éléments interactifs sont accessibles */
+button:not(:disabled),
+a[href],
+input:not(:disabled),
+select:not(:disabled),
+textarea:not(:disabled),
+[tabindex]:not([tabindex="-1"]) {
+  cursor: pointer;
+}
+
+/* Améliorer la lisibilité des textes */
+.keyboard-navigation p,
+.keyboard-navigation span,
+.keyboard-navigation div {
+  line-height: 1.6;
+}
+
+/* Espacement amélioré pour la navigation clavier */
+.keyboard-navigation button,
+.keyboard-navigation a {
+  min-height: 44px; /* Taille minimale recommandée pour le touch/accessibilité */
+  min-width: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+
+
+
+
+
+
+

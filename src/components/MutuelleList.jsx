@@ -1,60 +1,25 @@
-import React, { useState, useEffect } from 'react';
-import mutuelleService from '../_services/mutuelle.service';
+import React from 'react';
+import { useMutuelles } from '../hooks/useMutuelles';
+import LoadingSpinner from './LoadingSpinner';
+import ErrorMessage from './ErrorMessage';
 
 const MutuelleList = () => {
-  const [mutuelles, setMutuelles] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-
-  const loadMutuelles = async () => {
-    setLoading(true);
-    setError(null);
-    
-    try {
-      // Essayer d'abord la liste simple
-      const data = await mutuelleService.getMutuellesList();
-      setMutuelles(data);
-      
-      // Log de debug supprimé pour la production
-    } catch (err) {
-      console.error('Erreur avec getMutuellesList, essai avec getAllMutuelles:', err);
-      
-      try {
-        // Fallback vers getAllMutuelles
-        const data = await mutuelleService.getAllMutuelles();
-        setMutuelles(data);
-        
-        // Log de debug supprimé pour la production
-      } catch (fallbackErr) {
-        console.error('Erreur lors du chargement des mutuelles:', fallbackErr);
-        setError(fallbackErr);
-        setMutuelles([]);
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    loadMutuelles();
-  }, []);
+  const { data: mutuelles = [], isLoading: loading, error, refetch } = useMutuelles();
 
   if (loading) {
-    return (
-      <div className="flex justify-center items-center p-8">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
-        <span className="ml-2">Chargement des mutuelles...</span>
-      </div>
-    );
+    return <LoadingSpinner message="Chargement des mutuelles..." />;
   }
 
   if (error) {
     return (
-      <div className="text-center py-8 text-red-600">
-        <p>Erreur lors du chargement des mutuelles</p>
-        <p className="text-sm text-gray-500 mt-1">{error.message}</p>
+      <div className="text-center py-8">
+        <ErrorMessage
+          message={error?.message || 'Erreur lors du chargement des mutuelles'}
+          title="Erreur"
+          dismissible={false}
+        />
         <button 
-          onClick={loadMutuelles}
+          onClick={() => refetch()}
           className="mt-4 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
         >
           Réessayer
@@ -70,7 +35,7 @@ const MutuelleList = () => {
           Mutuelles disponibles ({mutuelles.length})
         </h2>
         <button 
-          onClick={loadMutuelles}
+          onClick={() => refetch()}
           className="px-3 py-1 text-sm bg-gray-100 text-gray-700 rounded hover:bg-gray-200 transition-colors"
         >
           Actualiser

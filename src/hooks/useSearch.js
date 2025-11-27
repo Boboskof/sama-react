@@ -84,13 +84,20 @@ export const useSearch = (category = null, options = {}) => {
     setError(null);
   }, []);
 
-  // Recherche automatique avec debounce
+  // Recherche automatique avec debounce (350ms pour meilleure fluidité)
   useEffect(() => {
+    // Si la query est vide ou trop courte, nettoyer immédiatement
+    if (!query || query.length < 2) {
+      setResults([]);
+      setTotal(0);
+      setHasMore(false);
+      setError(null);
+      return;
+    }
+
     const timeoutId = setTimeout(() => {
-      if (query) {
-        search(query);
-      }
-    }, 300);
+      search(query);
+    }, 350); // 350ms de debounce pour limiter les appels API
 
     return () => clearTimeout(timeoutId);
   }, [query, search]);

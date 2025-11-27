@@ -28,7 +28,6 @@ export const useAppointments = (filters: any = {}) => {
   return useQuery({
     queryKey: ['appointments', 'list', filters],
     queryFn: () => appointmentService.getAllAppointments(filters),
-    keepPreviousData: true,
     staleTime: 2 * 60 * 1000, // 2 minutes
     refetchOnWindowFocus: true,
   });

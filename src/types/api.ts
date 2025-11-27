@@ -189,6 +189,113 @@ export type Notification = {
   communications?: any[];  // Collection<Communication>
 };
 
+// ---- Exercices / entraînement ----
+
+export type ExerciseType = 'QCM' | 'CAS_PRATIQUE' | 'TRANSCRIPTION' | 'ETUDE_DOCUMENT';
+
+export type ExerciseAssignmentStatus = 'ASSIGNED' | 'IN_PROGRESS' | 'DONE';
+
+export interface ExerciseTemplateSummary {
+  id: string;
+  title: string;
+  description?: string | null;
+  type: ExerciseType;
+  difficulty: number; // 1–5
+  estimatedDurationMinutes?: number | null;
+  ccpCode?: string | null;
+  competences?: any[] | null; // JSON libre
+  isPublished: boolean;
+  createdAt: string; // "YYYY-MM-DD HH:MM:SS"
+  // Statistiques de réutilisation (optionnelles, fournies par le backend si disponible)
+  assignmentsCount?: number;
+  submissionsCount?: number;
+}
+
+export interface ExerciseQuestion {
+  id: string;
+  position: number;
+  type: 'QCM' | 'TEXTE' | 'CASE_A_COCHER';
+  prompt: string;
+  config?: any;      // options, etc.
+  maxScore: number;
+}
+
+export interface ExerciseTemplateDetail extends ExerciseTemplateSummary {
+  questions: ExerciseQuestion[];
+}
+
+export interface ExerciseAssignmentSummary {
+  assignmentId: string;
+  status: ExerciseAssignmentStatus;
+  dueAt?: string | null;     // "YYYY-MM-DD HH:MM:SS"
+  createdAt: string;
+  exercise: {
+    id: string;
+    title: string;
+    type: ExerciseType;
+    difficulty: number;
+    estimatedDurationMinutes?: number | null;
+    ccpCode?: string | null;
+  };
+}
+
+export interface ExerciseAnswerDetail {
+  id: string;
+  questionId: string;
+  question: {
+    position: number;
+    type: 'QCM' | 'TEXTE' | 'CASE_A_COCHER';
+    prompt: string;
+    config: any | null; // contient les options QCM, bonnes réponses, etc.
+    maxScore: number;
+  };
+  answer: any; // format dépend du type : { selected: [...] } pour QCM, { text: "..." } pour TEXTE
+  autoScore: number;
+  trainerComment: string | null;
+}
+
+export interface ExerciseSubmissionDetail {
+  id: string;
+  submittedAt: string; // "YYYY-MM-DD HH:MM:SS"
+  autoScore: number;
+  maxScore: number;
+  finalScore: number | null;
+  trainerFeedback: string | null;
+  validatedBy: {
+    id: string;
+    email: string;
+    nom: string;
+    prenom: string;
+  } | null;
+  stagiaire: {
+    id: string;
+    email: string;
+    nom: string;
+    prenom: string;
+  };
+  exercise: {
+    id: string;
+    title: string;
+    type: ExerciseType;
+  };
+  answers: ExerciseAnswerDetail[];
+}
+
+export interface ReviewSubmissionPayload {
+  finalScore?: number;
+  trainerFeedback?: string;
+  answers?: Array<{
+    answerId: string;
+    autoScore?: number;  // Pour ajuster le score automatique de chaque réponse
+    trainerComment?: string;
+  }>;
+}
+
+export interface ReviewSubmissionResponse {
+  message: string;
+  finalScore: number;
+}
+
 export type AuditLog = {
   id: ID;
   action?: string;         // Action effectuée (64 chars: CREATE, UPDATE, DELETE, SEND...)

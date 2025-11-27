@@ -1,71 +1,111 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState } from 'react';
 import { Link } from 'react-router-dom';
-import auditService from '../../_services/audit.service';
 import LoadingSpinner from '../../components/LoadingSpinner';
+import { formatDateTime } from '../../utils/dateHelpers';
+import {
+  useAuditStatsByUser,
+  useAuditStatsByAction,
+  useAuditStatsByEntity,
+  useAuditStatsByPeriod,
+  useAuditLogs,
+} from '../../hooks/useAudit';
 
 const AuditDashboard = () => {
-  const [statistics, setStatistics] = useState({});
-  const [recentLogs, setRecentLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
   const [timeRange, setTimeRange] = useState('day');
 
-  const loadAuditData = useCallback(async () => {
-    try {
-      setLoading(true);
-      
-      const [userStats, actionStats, entityStats, periodStats, recentLogsData] = await Promise.all([
-        auditService.getStatisticsByUser({}),
-        auditService.getStatisticsByAction({}),
-        auditService.getStatisticsByEntity({}),
-        auditService.getStatisticsByPeriod(timeRange, {}),
-        auditService.getAuditLogs({ limit: 10 })
-      ]);
+  // Chargement des statistiques via React Query
+  const {
+    data: usersStats,
+    isLoading: usersLoading,
+    error: usersError,
+  } = useAuditStatsByUser({});
 
-      setStatistics({
-        users: userStats || [],
-        actions: actionStats || [],
-        entities: entityStats || [],
-        period: periodStats || {}
-      });
-      
-      setRecentLogs(Array.isArray(recentLogsData) ? recentLogsData : []);
-    } catch (err) {
-      console.error('Erreur chargement données audit:', err);
-      setError('Impossible de charger les données d\'audit');
-    } finally {
-      setLoading(false);
-    }
-  }, [timeRange]);
+  const {
+    data: actionsStats,
+    isLoading: actionsLoading,
+    error: actionsError,
+  } = useAuditStatsByAction({});
 
-  useEffect(() => {
-    loadAuditData();
-  }, [loadAuditData]);
+  const {
+    data: entitiesStats,
+    isLoading: entitiesLoading,
+    error: entitiesError,
+  } = useAuditStatsByEntity({});
+
+  const {
+    data: periodStats,
+    isLoading: periodLoading,
+    error: periodError,
+  } = useAuditStatsByPeriod(timeRange, {});
+
+  const {
+    data: recentLogsData,
+    isLoading: recentLogsLoading,
+    error: recentLogsError,
+  } = useAuditLogs({ limit: 10, page: 1 });
+
+  const statistics = {
+    users: usersStats || [],
+    actions: actionsStats || [],
+    entities: entitiesStats || [],
+    period: periodStats || {},
+  };
+
+  const recentLogs = Array.isArray(recentLogsData?.data)
+    ? recentLogsData.data
+    : Array.isArray(recentLogsData)
+      ? recentLogsData
+      : [];
+
+  const loading =
+    usersLoading ||
+    actionsLoading ||
+    entitiesLoading ||
+    periodLoading ||
+    recentLogsLoading;
+
+  const error =
+    usersError || actionsError || entitiesError || periodError || recentLogsError;
 
   const handleTimeRangeChange = (newRange) => {
     setTimeRange(newRange);
   };
 
-  const formatDate = (dateString) => {
-    if (!dateString) return '—';
-    return new Date(dateString).toLocaleString('fr-FR');
-  };
 
   const getActionColor = (action) => {
-    return auditService.getActionColor(action);
+    // Couleurs cohérentes avec les classes Tailwind utilisées plus bas
+    switch (action) {
+      case 'CREATE':
+        return 'green';
+      case 'UPDATE':
+        return 'blue';
+      case 'DELETE':
+        return 'red';
+      default:
+        return 'gray';
+    }
   };
 
   const getActionLabel = (action) => {
-    return auditService.getActionLabel(action);
+    switch (action) {
+      case 'CREATE':
+        return 'Création';
+      case 'UPDATE':
+        return 'Modification';
+      case 'DELETE':
+        return 'Suppression';
+      default:
+        return action || 'Action';
+    }
   };
 
   if (loading) return <LoadingSpinner />;
   if (error) return <div className="text-red-500 text-center p-4">{error}</div>;
 
   return (
-    <div className="space-y-6 bg-indigo-100 min-h-screen p-6">
+    <div className="space-y-6 bg-indigo-100 min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6">
       {/* Header */}
-      <div className="bg-green-200 shadow-sm border-b">
+      <div className="bg-blue-200 shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center py-6">
             <div>
@@ -100,67 +140,68 @@ const AuditDashboard = () => {
         </div>
       </div>
 
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <div className="w-full px-4 sm:px-6 lg:px-8 py-8">
         {/* Statistiques générales */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-          <div className="bg-green-50 rounded-lg shadow p-6">
+          <div className="bg-white/90 backdrop-blur-sm p-6 rounded-lg shadow-lg border border-green-200">
             <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <div className="w-8 h-8 bg-green-100 rounded-full flex items-center justify-center">
-                  <span className="text-green-600 text-sm font-medium">👥</span>
-                </div>
+              <div className="p-2 bg-green-100 rounded-lg">
+                <svg className="w-6 h-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
               </div>
               <div className="ml-4">
-                <p className="text-sm font-medium text-gray-500">Utilisateurs actifs</p>
-                <p className="text-2xl font-semibold text-gray-900">
+                <p className="text-base font-medium text-gray-600">Utilisateurs actifs</p>
+                <p className="text-2xl font-bold text-gray-900">
                   {statistics.users?.length || 0}
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="bg-green-50 rounded-lg shadow p-6">
+          <div className="bg-white/90 backdrop-blur-sm p-6 rounded-lg shadow-lg border border-green-200">
             <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
-                  <span className="text-blue-600 text-sm font-medium">📊</span>
-                </div>
+              <div className="p-2 bg-blue-100 rounded-lg">
+                <svg className="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
               </div>
               <div className="ml-4">
-                <p className="text-sm font-medium text-gray-500">Actions totales</p>
-                <p className="text-2xl font-semibold text-gray-900">
+                <p className="text-base font-medium text-gray-600">Actions totales</p>
+                <p className="text-2xl font-bold text-gray-900">
                   {statistics.period?.total_actions || 0}
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="bg-green-50 rounded-lg shadow p-6">
+          <div className="bg-white/90 backdrop-blur-sm p-6 rounded-lg shadow-lg border border-green-200">
             <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <div className="w-8 h-8 bg-purple-100 rounded-full flex items-center justify-center">
-                  <span className="text-purple-600 text-sm font-medium">🔧</span>
-                </div>
+              <div className="p-2 bg-purple-100 rounded-lg">
+                <svg className="w-6 h-6 text-purple-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
               </div>
               <div className="ml-4">
-                <p className="text-sm font-medium text-gray-500">Types d'actions</p>
-                <p className="text-2xl font-semibold text-gray-900">
+                <p className="text-base font-medium text-gray-600">Types d'actions</p>
+                <p className="text-2xl font-bold text-gray-900">
                   {statistics.actions?.length || 0}
                 </p>
               </div>
             </div>
           </div>
 
-          <div className="bg-green-50 rounded-lg shadow p-6">
+          <div className="bg-white/90 backdrop-blur-sm p-6 rounded-lg shadow-lg border border-green-200">
             <div className="flex items-center">
-              <div className="flex-shrink-0">
-                <div className="w-8 h-8 bg-orange-100 rounded-full flex items-center justify-center">
-                  <span className="text-orange-600 text-sm font-medium">🏗️</span>
-                </div>
+              <div className="p-2 bg-orange-100 rounded-lg">
+                <svg className="w-6 h-6 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 7v10c0 2.21 3.582 4 8 4s8-1.79 8-4V7M4 7c0 2.21 3.582 4 8 4s8-1.79 8-4M4 7c0-2.21 3.582-4 8-4s8 1.79 8 4m0 5c0 2.21-3.582 4-8 4s-8-1.79-8-4" />
+                </svg>
               </div>
               <div className="ml-4">
-                <p className="text-sm font-medium text-gray-500">Entités modifiées</p>
-                <p className="text-2xl font-semibold text-gray-900">
+                <p className="text-base font-medium text-gray-600">Entités modifiées</p>
+                <p className="text-2xl font-bold text-gray-900">
                   {statistics.entities?.length || 0}
                 </p>
               </div>
@@ -172,7 +213,7 @@ const AuditDashboard = () => {
           {/* Top utilisateurs */}
           <div className="bg-green-50 rounded-lg shadow">
             <div className="px-6 py-4 border-b border-green-200">
-              <h3 className="text-lg font-medium text-gray-900">Top utilisateurs les plus actifs</h3>
+              <h3 className="text-2xl font-medium text-gray-900">Top utilisateurs les plus actifs</h3>
               <p className="text-sm text-gray-500">Classement par nombre d'actions</p>
             </div>
             <div className="p-6">
@@ -186,7 +227,7 @@ const AuditDashboard = () => {
                         </div>
                         <div className="ml-3">
                           <p className="text-sm font-medium text-gray-900">
-                            {user.prenom} {user.nom}
+                            {user.full_name || `${user.prenom || ''} ${user.nom || ''}`.trim()}
                           </p>
                           <p className="text-sm text-gray-500">{user.email}</p>
                         </div>
@@ -207,7 +248,7 @@ const AuditDashboard = () => {
           {/* Répartition des actions */}
           <div className="bg-green-50 rounded-lg shadow">
             <div className="px-6 py-4 border-b border-green-200">
-              <h3 className="text-lg font-medium text-gray-900">Répartition des actions</h3>
+              <h3 className="text-2xl font-medium text-gray-900">Répartition des actions</h3>
               <p className="text-sm text-gray-500">Par type d'action</p>
             </div>
             <div className="p-6">
@@ -238,7 +279,7 @@ const AuditDashboard = () => {
         {statistics.entities && statistics.entities.length > 0 && (
           <div className="mt-8 bg-green-50 rounded-lg shadow">
             <div className="px-6 py-4 border-b border-green-200">
-              <h3 className="text-lg font-medium text-gray-900">Entités les plus modifiées</h3>
+              <h3 className="text-2xl font-medium text-gray-900">Entités les plus modifiées</h3>
               <p className="text-sm text-gray-500">Par type d'entité</p>
             </div>
             <div className="p-6">
@@ -261,7 +302,7 @@ const AuditDashboard = () => {
           <div className="px-6 py-4 border-b border-green-200">
             <div className="flex justify-between items-center">
               <div>
-                <h3 className="text-lg font-medium text-gray-900">Activité récente</h3>
+                <h3 className="text-2xl font-medium text-gray-900">Activité récente</h3>
                 <p className="text-sm text-gray-500">10 dernières actions</p>
               </div>
               <Link
@@ -278,12 +319,15 @@ const AuditDashboard = () => {
                 {recentLogs.map((log) => (
                   <div key={log.id} className="flex items-start space-x-3 p-3 bg-white rounded-lg">
                     <div className="flex-shrink-0">
-                      <span className="text-lg">
-                        {log.action === 'CREATE' ? '➕' : 
-                         log.action === 'UPDATE' ? '✏️' : 
-                         log.action === 'DELETE' ? '🗑️' : 
-                         log.action === 'LOGIN' ? '🔐' : 
-                         log.action === 'LOGOUT' ? '🚪' : '📝'}
+                      <span className="material-symbols-rounded text-2xl text-gray-600">
+                        {/* Icône générique basée sur l'action */}
+                        {log.action === 'CREATE'
+                          ? 'add_circle'
+                          : log.action === 'UPDATE'
+                          ? 'edit'
+                          : log.action === 'DELETE'
+                          ? 'delete'
+                          : 'info'}
                       </span>
                     </div>
                     <div className="flex-1 min-w-0">
@@ -292,14 +336,14 @@ const AuditDashboard = () => {
                           {getActionLabel(log.action)}
                         </p>
                         <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full bg-${getActionColor(log.action)}-100 text-${getActionColor(log.action)}-800`}>
-                          {auditService.formatEntityType(log.entityType)}
+                          {log.entityType || 'Entité'}
                         </span>
                       </div>
                       <p className="text-sm text-gray-500">
-                        {log.user ? `${log.user.prenom} ${log.user.nom}` : 'Système'}
+                        {log.user ? (log.user.full_name || `${log.user.prenom || ''} ${log.user.nom || ''}`.trim()) : 'Système'}
                       </p>
                       <p className="text-xs text-gray-400">
-                        {formatDate(log.createdAt)}
+                        {formatDateTime(log.createdAt)}
                       </p>
                     </div>
                   </div>
@@ -316,5 +360,3 @@ const AuditDashboard = () => {
 };
 
 export default AuditDashboard;
-
-

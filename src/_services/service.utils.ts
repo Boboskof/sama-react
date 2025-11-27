@@ -37,7 +37,7 @@ export async function safeGetList<T>(p: Promise<AxiosResponse<any>>): Promise<T[
   } catch (e: any) {
     if (e?.response?.status === 404) return [];
     if (e?.response?.status === 500) {
-      console.error('❌ safeGetList 500 response:', e.response?.data);
+      console.error('safeGetList 500 response:', e.response?.data);
       if (Array.isArray(e.response?.data)) {
         return e.response.data as T[];
       }

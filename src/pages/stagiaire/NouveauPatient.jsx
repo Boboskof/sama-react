@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import patientService from '../../_services/patient.service';
-import mutuelleService from '../../_services/mutuelle.service';
+import { useMutuelles, useCreateCustomMutuelle } from '../../hooks/useMutuelles';
 import LoadingSpinner from '../../components/LoadingSpinner';
 
 const NouveauPatient = () => {
@@ -9,14 +9,22 @@ const NouveauPatient = () => {
   const [loading, setLoading] = useState(false);
   const [submitError, setSubmitError] = useState('');
 
-  // Mutuelles
-  const [insuranceCompanies, setInsuranceCompanies] = useState([]);
-  const [loadingInsurance, setLoadingInsurance] = useState(true);
+  // Mutuelles avec React Query
+  const { data: mutuelles = [], isLoading: loadingInsurance, error: mutuellesError } = useMutuelles();
+  const createCustomMutuelleMutation = useCreateCustomMutuelle();
+  
+  // Trier les mutuelles par ordre alphabétique
+  const insuranceCompanies = useMemo(() => {
+    return [...mutuelles].sort((a, b) => {
+      const nameA = (a.nom || a.name || '').toLowerCase().trim();
+      const nameB = (b.nom || b.name || '').toLowerCase().trim();
+      return nameA.localeCompare(nameB, 'fr', { sensitivity: 'base' });
+    });
+  }, [mutuelles]);
   
   // États pour l'option "Autre" mutuelle
   const [showCustomMutuelle, setShowCustomMutuelle] = useState(false);
   const [customMutuelleName, setCustomMutuelleName] = useState('');
-  const [creatingCustomMutuelle, setCreatingCustomMutuelle] = useState(false);
   const [loadError, setLoadError] = useState('');
 
   // Form
@@ -44,8 +52,8 @@ const NouveauPatient = () => {
     notesTraitements: '',
     notesAutres: '',
     // Champs supplémentaires
-    emergencyContact: '',
-    emergencyPhone: '',
+    contactUrgenceNom: '',
+    contactUrgenceTelephone: '',
     // Champs de couverture mutuelle
     mutuelleId: '', // ID de la mutuelle sélectionnée
     numeroAdherent: '',
@@ -54,63 +62,21 @@ const NouveauPatient = () => {
     couvertureValide: true
   });
 
-  // Charger les mutuelles
+  // Gérer les erreurs de chargement des mutuelles
   useEffect(() => {
-    const loadInsuranceCompanies = async () => {
-      try {
-        setLoadingInsurance(true);
-        setLoadError('');
-        
-        // Utiliser l'API Platform pour récupérer les vraies mutuelles avec IRIs
-        const data = await mutuelleService.getAllMutuelles();
-        
-        
-        
-        // Les données sont déjà au bon format avec @id
-        setInsuranceCompanies(data);
-      } catch (error) {
-        console.error('Erreur lors du chargement des mutuelles:', error);
-        setLoadError("Impossible de charger les mutuelles. Vérifiez votre connexion et réessayez.");
-        
-        // Fallback avec l'ancien service
-        try {
-          const fallbackData = await patientService.getInsuranceCompanies();
-          
-          const transformedData = Array.isArray(fallbackData) 
-            ? fallbackData.map((name, index) => ({ 
-                id: index + 1, 
-                '@id': `/api/mutuelles/${index + 1}`,
-                name: name 
-              }))
-            : [];
-          
-          setInsuranceCompanies(transformedData);
-        } catch (fallbackError) {
-          console.error('Erreur fallback:', fallbackError);
-          // Liste fallback finale
-          setInsuranceCompanies([
-            { id: 1, name: 'Mutuelle Générale' },
-            { id: 2, name: 'MGEN' },
-            { id: 3, name: 'Harmonie Mutuelle' },
-            { id: 4, name: 'Mutuelle Familiale' },
-            { id: 5, name: 'MACSF' },
-            { id: 6, name: 'MNH' }
-          ]);
-        }
-      } finally {
-        setLoadingInsurance(false);
-      }
-    };
-
-    loadInsuranceCompanies();
-  }, []);
+    if (mutuellesError) {
+      setLoadError("Impossible de charger les mutuelles. Vérifiez votre connexion et réessayez.");
+    } else {
+      setLoadError('');
+    }
+  }, [mutuellesError]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
     
     // Nettoyer le téléphone pour le backend
     let cleanedValue = value;
-    if (name === 'telephone') {
+    if (name === 'telephone' || name === 'contactUrgenceTelephone') {
       // Garder seulement les chiffres, +, espaces, tirets, parenthèses et points
       cleanedValue = value.replace(/[^0-9\s\+\-\(\)\.]/g, '');
     }
@@ -147,21 +113,8 @@ const NouveauPatient = () => {
     }
 
     try {
-      setCreatingCustomMutuelle(true);
+      const response = await createCustomMutuelleMutation.mutateAsync(customMutuelleName.trim());
       
-      // Utiliser le service mutuelle avec authentification
-      const response = await mutuelleService.createCustomMutuelle(
-        customMutuelleName.trim()
-      );
-
-      // Ajouter la nouvelle mutuelle à la liste
-      const newMutuelle = {
-        id: response.mutuelle.id,
-        '@id': `/api/mutuelles/${response.mutuelle.id}`,
-        name: response.mutuelle.nom
-      };
-      
-      setInsuranceCompanies(prev => [...prev, newMutuelle]);
       // Utiliser l'ID numérique pour l'API Platform
       setFormData(prev => ({ ...prev, mutuelleId: response.mutuelle.id }));
       
@@ -173,8 +126,6 @@ const NouveauPatient = () => {
     } catch (error) {
       console.error('Erreur lors de la création de la mutuelle:', error);
       setCustomMutuelleMessage({ type: 'error', text: 'Erreur lors de la création de la mutuelle' });
-    } finally {
-      setCreatingCustomMutuelle(false);
     }
   };
 
@@ -216,11 +167,27 @@ const NouveauPatient = () => {
       }
       
       // 1. Construire le payload patient (sans mutuelle)
+      // Normaliser le téléphone (comme dans le service patient.service.ts)
+      const normalizePhoneForBackend = (phone) => {
+        if (!phone) return undefined;
+        // Supprimer tous les espaces, tirets, parenthèses et points
+        let cleaned = phone.replace(/[\s\-\(\)\.]/g, '');
+        // Si commence par +33, remplacer par 0
+        if (cleaned.startsWith('+33')) {
+          cleaned = '0' + cleaned.substring(3);
+        }
+        // Si commence par 33 et a 12 chiffres, remplacer par 0
+        if (cleaned.startsWith('33') && cleaned.length === 12) {
+          cleaned = '0' + cleaned.substring(2);
+        }
+        return cleaned;
+      };
+
       const patientPayload = {
         prenom: formData.prenom,
         nom: formData.nom,
         email: formData.email || undefined,
-        telephone: formData.telephone || undefined,
+        telephone: normalizePhoneForBackend(formData.telephone),
         dateNaissance: formData.dateNaissance || undefined,
         genre: formData.genre || undefined,
         statut: formData.statut || 'ACTIF',
@@ -240,8 +207,8 @@ const NouveauPatient = () => {
           const hasAny = Object.values(n).some(v => v && v.length > 0);
           return hasAny ? n : undefined;
         })(),
-        emergencyContact: formData.emergencyContact || undefined,
-        emergencyPhone: formData.emergencyPhone || undefined,
+        contactUrgenceNom: formData.contactUrgenceNom || null,
+        contactUrgenceTelephone: normalizePhoneForBackend(formData.contactUrgenceTelephone) || null,
         // ❌ PAS de champs mutuelle ici - séparés dans les couvertures
       };
 
@@ -271,14 +238,14 @@ const NouveauPatient = () => {
           await patientService.createCouverture(couvertureData);
           
         } catch (error) {
-          console.error('❌ Erreur création couverture:', error);
+          console.error('Erreur création couverture:', error);
           // Ne pas faire échouer la création du patient si la couverture échoue
         }
       }
       
       navigate('/patients');
     } catch (error) {
-      console.error('❌ Erreur lors de la création du patient:', error);
+      console.error('Erreur lors de la création du patient:', error);
       setSubmitError('Erreur lors de la création du patient. Vérifiez les champs et réessayez.');
     } finally {
       setLoading(false);
@@ -286,7 +253,7 @@ const NouveauPatient = () => {
   };
 
   return (
-    <div className="space-y-6 bg-orange-100 min-h-screen p-6">
+    <div className="space-y-6 bg-orange-100 min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6">
       <div className="max-w-4xl mx-auto px-4">
         {/* Header */}
         <div className="bg-orange-200 rounded-lg shadow-md p-6 mb-6">
@@ -466,6 +433,37 @@ const NouveauPatient = () => {
               </div>
             </div>
 
+            {/* Contact d'urgence */}
+            <div>
+              <h3 className="text-lg font-semibold text-gray-900 mb-4">Contact d'urgence</h3>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Nom du contact d'urgence / Lien avec le patient</label>
+                  <input
+                    type="text"
+                    name="contactUrgenceNom"
+                    value={formData.contactUrgenceNom}
+                    onChange={handleChange}
+                    className="w-full px-3 py-2 border border-orange-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                    placeholder="Ex: Jean Dupont"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Téléphone du contact d'urgence</label>
+                  <input
+                    type="tel"
+                    name="contactUrgenceTelephone"
+                    value={formData.contactUrgenceTelephone}
+                    onChange={handleChange}
+                    className="w-full px-3 py-2 border border-orange-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
+                    placeholder="Ex: 06 12 34 56 78"
+                    pattern="[0-9\s\+\-\(\)\.]{10,20}"
+                    title="Format accepté: 06 12 34 56 78, +33 6 12 34 56 78, etc."
+                  />
+                </div>
+              </div>
+            </div>
+
             {/* Sécurité sociale */}
             <div>
               <h3 className="text-lg font-semibold text-gray-900 mb-4">Sécurité sociale</h3>
@@ -546,8 +544,8 @@ const NouveauPatient = () => {
                   <label className="block text-sm font-medium text-gray-700 mb-1">Mutuelle</label>
                   {loadingInsurance ? (
                     <div className="w-full px-3 py-2 border border-orange-300 rounded-lg bg-gray-50 flex items-center">
-                      <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-orange-500 mr-2"></div>
-                      <span className="text-sm text-gray-500">Chargement des mutuelles...</span>
+                      <LoadingSpinner color="orange" size="small" inline={true} />
+                      <span className="ml-2 text-sm text-gray-500">Chargement des mutuelles...</span>
                     </div>
                   ) : (
                     <select
@@ -595,10 +593,10 @@ const NouveauPatient = () => {
                           <button
                             type="button"
                             onClick={handleCreateCustomMutuelle}
-                            disabled={creatingCustomMutuelle || !customMutuelleName.trim()}
+                            disabled={createCustomMutuelleMutation.isPending || !customMutuelleName.trim()}
                             className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors"
                           >
-                            {creatingCustomMutuelle ? 'Création...' : 'Créer la mutuelle'}
+                            {createCustomMutuelleMutation.isPending ? 'Création...' : 'Créer la mutuelle'}
                           </button>
                           <button
                             type="button"
@@ -707,7 +705,7 @@ const NouveauPatient = () => {
                     onChange={handleChange}
                     rows={4}
                     className="w-full px-3 py-2 border border-orange-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent"
-                    placeholder="Contact d'urgence, observations diverses..."
+                    placeholder="Observations diverses..."
                   />
                 </div>
               </div>

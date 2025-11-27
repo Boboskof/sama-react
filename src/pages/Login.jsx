@@ -1,12 +1,23 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import userService from '../_services/user.service';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, Link, useLocation } from 'react-router-dom';
 
 const Login = () => {
   const [credentials, setCredentials] = useState({ email: "", password: "" });
   const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
-  // const navigate = useNavigate();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  // Afficher le message de succès si présent dans location.state
+  useEffect(() => {
+    if (location.state?.message) {
+      setMessage(location.state.message);
+      // Nettoyer l'état de navigation pour éviter de réafficher le message au rafraîchissement
+      window.history.replaceState({}, document.title);
+    }
+  }, [location]);
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -19,16 +30,59 @@ const Login = () => {
     setError("");
 
     try {
-      // ✅ Envoyer email et password, userService se charge du mapping
-      const user = await userService.login({
+      // Connexion (getCurrentUser est appelé automatiquement dans login)
+      await userService.login({
         email: credentials.email,
         password: credentials.password,
       });
 
-
-      // Les infos (token + user) sont déjà sauvegardées, l’event 'authChange' est émis.
-      // (optionnel) rediriger :
-      // navigate("/");
+      // S'assurer que l'utilisateur est bien chargé depuis /api/me
+      // TOUJOURS appeler getCurrentUser() pour obtenir les données complètes de /api/me
+      let currentUser = await userService.getCurrentUser();
+      
+      // Si getCurrentUser() ne retourne rien, réessayer depuis localStorage
+      if (!currentUser) {
+        currentUser = userService.getUser();
+      }
+      
+      // Si toujours pas d'utilisateur, attendre un peu et réessayer
+      if (!currentUser) {
+        await new Promise(resolve => setTimeout(resolve, 200));
+        currentUser = await userService.getCurrentUser();
+        if (!currentUser) {
+          currentUser = userService.getUser();
+        }
+      }
+      
+      // Rediriger selon le rôle - Ordre IMPORTANT : Admin > Formateur > Stagiaire
+      if (currentUser) {
+        // 1. Vérifier isAdmin en PRIORITÉ (priorité la plus haute)
+        if (currentUser.isAdmin === true || currentUser.primaryRole === 'ROLE_ADMIN') {
+          window.location.href = '/admin/dashboard';
+        }
+        // 2. Vérifier isFormateur (priorité moyenne)
+        else if (currentUser.isFormateur === true || currentUser.primaryRole === 'ROLE_FORMATEUR') {
+          window.location.href = '/formateur/dashboard';
+        }
+        // 3. Vérifier isStagiaire (priorité la plus basse)
+        else if (currentUser.isStagiaire === true || currentUser.primaryRole === 'ROLE_STAGIAIRE') {
+          window.location.href = '/';
+        }
+        // Fallback : utiliser userService comme dernier recours
+        else {
+          const isAdmin = userService.isAdmin && userService.isAdmin();
+          const isFormateur = userService.isFormateur && userService.isFormateur();
+          if (isAdmin) {
+            window.location.href = '/admin/dashboard';
+          } else if (isFormateur) {
+            window.location.href = '/formateur/dashboard';
+          } else {
+            window.location.href = '/';
+          }
+        }
+      } else {
+        window.location.href = '/';
+      }
     } catch (err) {
       if (err?.code === 'ERR_NETWORK') {
         setError("Impossible de se connecter au serveur. Vérifiez que votre backend est démarré.");
@@ -98,6 +152,12 @@ const Login = () => {
               </div>
             )}
 
+            {message && (
+              <div className="bg-green-50 border border-green-200 text-green-600 px-4 py-3 rounded-md">
+                {message}
+              </div>
+            )}
+
             <div className="flex space-x-4">
               <button
                 type="button"
@@ -116,12 +176,12 @@ const Login = () => {
             </div>
 
             <div className="text-center">
-              <button
-                type="button"
-                className="bg-blue-400 text-white py-2 px-6 rounded-md hover:bg-blue-500 transition-colors"
+              <Link
+                to="/forgot-password"
+                className="inline-block bg-blue-400 text-white py-2 px-6 rounded-md hover:bg-blue-500 transition-colors"
               >
                 Mot de passe oublié
-              </button>
+              </Link>
             </div>
           </form>
         </div>
@@ -131,7 +191,7 @@ const Login = () => {
         <div className="max-w-7xl mx-auto">
           <div className="flex flex-col md:flex-row items-center justify-between">
             <div className="mb-4 md:mb-0">
-              <p className="text-sm">UGECAM © 2023</p>
+              <p className="text-sm">© 2025 SAMA - Tous droits réservés</p>
             </div>
             <div className="flex space-x-6 mb-4 md:mb-0">
               <a href="#" className="text-sm hover:underline">Mentions légales</a>
@@ -139,10 +199,11 @@ const Login = () => {
               <a href="#" className="text-sm hover:underline">Politique de confidentialité</a>
             </div>
             <div className="flex items-center space-x-2">
-              <div className="w-8 h-8 bg-white rounded flex items-center justify-center">
-                <div className="w-4 h-4 bg-red-500 rounded-sm"></div>
-              </div>
-              <span className="text-sm font-medium">GROUPE UGECAM</span>
+              <img 
+                src="/logoSama/Logo-UGECAM.jpg" 
+                alt="UGECAM Logo" 
+                className="h-8 w-auto"
+              />
             </div>
           </div>
         </div>

@@ -1,13 +1,5 @@
 import Axios from './caller.service';
-
-// Utilitaire pour dérouler les réponses mutuelles (support tous formats)
-function unwrapMutuelles(d: any): Mutuelle[] {
-  if (Array.isArray(d)) return d;
-  if (Array.isArray(d?.['hydra:member'])) return d['hydra:member'];
-  if (Array.isArray(d?.member)) return d.member;
-  if (Array.isArray(d?.data)) return d.data;
-  return [];
-}
+import { unwrapList } from './service.utils';
 
 export interface Mutuelle {
   id: string;
@@ -69,10 +61,9 @@ const mutuelleService = {
       .then(r => {
         if (import.meta.env.DEV) {
         }
-        return unwrapMutuelles(r.data);
+        return unwrapList<Mutuelle>(r.data);
       })
       .catch(error => {
-        console.error('Erreur lors du chargement des mutuelles:', error);
         throw error;
       });
   },
@@ -83,10 +74,9 @@ const mutuelleService = {
       .then(r => {
         if (import.meta.env.DEV) {
         }
-        return unwrapMutuelles(r.data);
+        return unwrapList<Mutuelle>(r.data);
       })
       .catch(error => {
-        console.error('Erreur lors du chargement de la liste simple:', error);
         throw error;
       });
   },

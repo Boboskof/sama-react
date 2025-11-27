@@ -33,6 +33,7 @@ export function buildAppointmentParams(f: UIAppointmentFilters): URLSearchParams
     // Si c'est un UUID, on ne l'envoie pas car le backend ne filtre que par nom
   }
   
+  // Le backend attend patient_id dans les query params, qui est transformé en patient.id dans les filtres
   if (f.patientId) p.append('patient_id', String(f.patientId));
   
   // Format de date attendu par le backend : date_debut et date_fin (YYYY-MM-DD)

@@ -1,49 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import patientService from '../../_services/patient.service';
-import mutuelleService from '../../_services/mutuelle.service';
+import { useSearchMutuelles } from '../../hooks/useMutuelles';
 import documentService from '../../_services/document.service';
 import hospitalisationService from '../../_services/hospitalisation.service';
 import appointmentService from '../../_services/appointment.service';
 import justificatifService from '../../_services/justificatif.service';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import ErrorMessage from '../../components/ErrorMessage';
+import PatientName from '../../components/PatientName';
+import { getPatientStatusMeta } from '../../utils/patientHelpers';
+import { formatDate, formatDateTime, formatFileSize } from '../../utils/dateHelpers';
+import { getAppointmentStatusClasses } from '../../utils/appointmentHelpers';
 
-const PATIENT_STATUS_META = {
-  ACTIF: {
-    label: 'Actif',
-    badgeClass: 'bg-green-100 text-green-800 border border-green-200',
-    icon: '✅'
-  },
-  INACTIF: {
-    label: 'Inactif',
-    badgeClass: 'bg-gray-100 text-gray-800 border border-gray-300',
-    icon: '⏸️'
-  },
-  DECEDE: {
-    label: 'Décédé',
-    badgeClass: 'bg-red-100 text-red-800 border border-red-300 font-semibold',
-    icon: '⚰️'
-  }
-};
-
-const getPatientStatusMeta = (statut, statutLabel) => {
-  if (!statut && !statutLabel) return null;
-  const key = String(statut || '').toUpperCase();
-  const base = PATIENT_STATUS_META[key];
-  if (!base) {
-    return {
-      label: statutLabel || statut || 'Statut inconnu',
-      badgeClass: 'bg-orange-100 text-orange-800 border border-orange-200',
-      icon: 'ℹ️'
-    };
-  }
-  return {
-    ...base,
-    code: key,
-    label: statutLabel || base.label
-  };
-};
 
 const PatientSingle = () => {
   const { id } = useParams();
@@ -73,24 +42,29 @@ const PatientSingle = () => {
   const [previewDoc, setPreviewDoc] = useState(null);
   const [previewUrl, setPreviewUrl] = useState('');
   const [previewMime, setPreviewMime] = useState('');
+  const [previewTextContent, setPreviewTextContent] = useState('');
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState('');
   // Justificatifs
   const [justificatifsStatus, setJustificatifsStatus] = useState(null);
   const [justificatifsLoading, setJustificatifsLoading] = useState(false);
-  const buildDocUrl = (doc) => {
-    return doc?.url || doc?.fileUrl || doc?.path || (doc?.id ? `/api/documents/${doc.id}/download` : '');
-  };
+  // Blob URLs pour les fichiers audio (pour éviter les erreurs 401)
+  const [audioBlobUrls, setAudioBlobUrls] = useState({});
+  const loadingAudioIds = useRef(new Set());
+  
   const revokePreviewUrl = () => {
     try { if (previewUrl && previewUrl.startsWith('blob:')) URL.revokeObjectURL(previewUrl); } catch {}
     setPreviewUrl('');
+    setPreviewTextContent(''); // Nettoyer aussi le contenu texte
   };
+  
   const openPreview = async (doc) => {
     setPreviewError('');
     setPreviewLoading(true);
     setPreviewDoc(doc);
     setShowDocPreview(true);
     revokePreviewUrl();
+    setPreviewTextContent(''); // Réinitialiser le contenu texte
     try {
       // Test 1: vérifier que l'ID est valide et récupérer les métadonnées à jour
       if (doc?.id) {
@@ -113,6 +87,21 @@ const PatientSingle = () => {
           const url = URL.createObjectURL(blob);
           setPreviewUrl(url);
           setPreviewMime(blob.type || (doc.mimeType || doc.type || ''));
+          
+          // Si c'est un fichier texte, charger le contenu directement
+          const mime = (blob.type || doc.mimeType || '').toLowerCase();
+          const fileName = (doc.originalName || doc.fileName || '').toLowerCase();
+          const isText = mime === 'text/plain' || mime.startsWith('text/') || /\.(txt|md|log|csv|json|xml|html|css|js|ts|tsx|jsx)$/i.test(fileName);
+          
+          if (isText) {
+            try {
+              const text = await blob.text();
+              setPreviewTextContent(text);
+            } catch (e) {
+              console.error('Erreur lors de la lecture du contenu texte:', e);
+            }
+          }
+          
           setPreviewLoading(false);
           return;
         }
@@ -120,7 +109,7 @@ const PatientSingle = () => {
       // Pas de fallback URL direct pour éviter 401 sans header Authorization
       setPreviewError('Aperçu non disponible');
     } catch (e) {
-      setPreviewError("Aperçu non disponible");
+      setPreviewError('Aperçu non disponible');
     } finally {
       setPreviewLoading(false);
     }
@@ -138,36 +127,141 @@ const PatientSingle = () => {
   const [newDocContent, setNewDocContent] = useState('');
   const [newDocType, setNewDocType] = useState('COMPTE_RENDU_CONSULTATION');
   const closeAddDoc = () => { setShowAddDoc(false); setNewDocFile(null); setNewDocContent(''); setNewDocType('COMPTE_RENDU_CONSULTATION'); };
+  
+  // États pour les enregistrements audio
+  const [audios, setAudios] = useState([]);
+  const [audiosLoading, setAudiosLoading] = useState(false);
+  const [audiosError, setAudiosError] = useState('');
+  
+  // Charger les blob URLs pour les fichiers audio
+  useEffect(() => {
+    if (!audios || audios.length === 0) return;
+    
+    const loadAudioBlobUrls = async () => {
+      for (const audio of audios) {
+        const audioId = audio.id || audio['@id'];
+        if (!audioId) continue;
+        
+        // Ignorer les transcriptions (pas besoin de blob URL pour elles)
+        const mimeType = (audio.mimeType || audio.mime_type || '').toLowerCase();
+        if (!mimeType.startsWith('audio/')) continue;
+        
+        // Vérifier si déjà chargé ou en cours de chargement
+        if (loadingAudioIds.current.has(audioId)) continue;
+        
+        loadingAudioIds.current.add(audioId);
+        
+        try {
+          const blob = await documentService.downloadDocument(audioId);
+          if (blob) {
+            const blobUrl = URL.createObjectURL(blob);
+            setAudioBlobUrls(prev => {
+              // Vérifier si déjà existant pour éviter les doublons
+              if (prev[audioId]) {
+                URL.revokeObjectURL(blobUrl); // Nettoyer le nouveau si déjà existant
+                return prev;
+              }
+              return { ...prev, [audioId]: blobUrl };
+            });
+          }
+        } catch (e) {
+          console.error(`Erreur lors du chargement du blob pour l'audio ${audioId}:`, e);
+        } finally {
+          loadingAudioIds.current.delete(audioId);
+        }
+      }
+    };
+    
+    loadAudioBlobUrls();
+    
+    // Nettoyer les blob URLs au démontage
+    return () => {
+      setAudioBlobUrls(prev => {
+        Object.values(prev).forEach(url => {
+          if (url && url.startsWith('blob:')) {
+            try {
+              URL.revokeObjectURL(url);
+            } catch (e) {
+              // Ignorer les erreurs de nettoyage
+            }
+          }
+        });
+        return {};
+      });
+      loadingAudioIds.current.clear();
+    };
+  }, [audios]); // Recharger quand les audios changent
+  const [showAddAudio, setShowAddAudio] = useState(false);
+  const [newAudioFile, setNewAudioFile] = useState(null);
+  const [uploadingAudio, setUploadingAudio] = useState(false);
+  const closeAddAudio = () => { setShowAddAudio(false); setNewAudioFile(null); };
+  // États pour l'ajout de transcription
+  const [showAddTranscription, setShowAddTranscription] = useState(false);
+  const [selectedAudioForTranscription, setSelectedAudioForTranscription] = useState(null);
+  const [newTranscriptionFile, setNewTranscriptionFile] = useState(null);
+  const [uploadingTranscription, setUploadingTranscription] = useState(false);
+  const closeAddTranscription = () => { 
+    setShowAddTranscription(false); 
+    setSelectedAudioForTranscription(null);
+    setNewTranscriptionFile(null);
+  };
   const submitAddDoc = async () => {
     if (!newDocFile || !id) return;
+    
+    // Validation préventive du format de fichier
+    const fileName = newDocFile.name || '';
+    const fileExtension = fileName.split('.').pop()?.toLowerCase() || '';
+    const allowedExtensions = {
+      'COMPTE_RENDU': ['pdf', 'doc', 'docx', 'txt'],
+      'ORDONNANCE': ['pdf', 'doc', 'docx', 'txt'],
+      'CERTIFICAT': ['pdf', 'doc', 'docx', 'txt'],
+      'RADIOGRAPHIE': ['pdf', 'jpg', 'jpeg', 'png', 'dicom'],
+      'FSE': ['pdf', 'xml'],
+      'AUTRE': ['pdf', 'doc', 'docx', 'txt', 'jpg', 'jpeg', 'png']
+    };
+    
+    const legacyType = (() => {
+      if (!newDocType) return 'AUTRE';
+      if (['CARTE_IDENTITE', 'CARTE_VITALE', 'CONTACTS_URGENCE', 'CARTE_MUTUELLE'].includes(newDocType)) return newDocType;
+      if (newDocType === 'ORDONNANCE' || newDocType === 'PRESCRIPTION_EXAMEN') return 'ORDONNANCE';
+      if (['RADIOGRAPHIE','ECHOGRAPHIE','ENDOSCOPIE','DERMATOSCOPIE'].includes(newDocType)) return 'RADIOGRAPHIE';
+      if (newDocType.startsWith('COMPTE_RENDU_')) return 'COMPTE_RENDU';
+      if (newDocType.startsWith('CERTIFICAT_') || newDocType === 'ATTESTATION_MALADIE') return 'CERTIFICAT';
+      if (newDocType === 'FSE') return 'FSE';
+      if (newDocType.startsWith('ANALYSES_') || ['ELECTROCARDIOGRAMME','SPIROMETRIE','DOSSIER_MEDICAL','PLAN_DE_SOINS','SUIVI_THERAPEUTIQUE','PSYCHOLOGIE','KINESITHERAPIE','DIETETIQUE','FICHE_DE_LIAISON','PROTOCOLE_URGENCE'].includes(newDocType)) return 'COMPTE_RENDU';
+      return 'AUTRE';
+    })();
+    
+    const allowedForType = allowedExtensions[legacyType] || allowedExtensions['AUTRE'];
+    if (!allowedForType.includes(fileExtension)) {
+      setFlashMessage({ 
+        type: 'error', 
+        text: `Format de fichier non autorisé. Pour un ${legacyType.toLowerCase().replace('_', ' ')}, les formats autorisés sont : ${allowedForType.map(ext => `.${ext.toUpperCase()}`).join(', ')}. Format reçu : .${fileExtension.toUpperCase()}` 
+      });
+      setTimeout(() => setFlashMessage({ type: '', text: '' }), 5000);
+      return;
+    }
+    
     try {
       setUploadingDoc(true);
       const fd = new FormData();
-      fd.append('file', newDocFile);
+      
+      // API Platform attend généralement "file" pour les uploads
+      // Mais certains backends attendent "document" - essayer "file" d'abord
+      fd.append('file', newDocFile, newDocFile.name);
+      
       if (newDocContent) fd.append('contenu', newDocContent);
-      // Mapper type détaillé -> type legacy pour compat serveur
-      const mapLegacyType = (t) => {
-        if (!t) return 'AUTRE';
-        // Justificatifs requis (garder le type exact pour la détection)
-        if (['CARTE_IDENTITE', 'CARTE_VITALE', 'CONTACTS_URGENCE', 'CARTE_MUTUELLE'].includes(t)) return t;
-        if (t === 'ORDONNANCE' || t === 'PRESCRIPTION_EXAMEN') return 'ORDONNANCE';
-        if (['RADIOGRAPHIE','ECHOGRAPHIE','ENDOSCOPIE','DERMATOSCOPIE'].includes(t)) return 'RADIOGRAPHIE';
-        if (t.startsWith('COMPTE_RENDU_')) return 'COMPTE_RENDU';
-        if (t.startsWith('CERTIFICAT_') || t === 'ATTESTATION_MALADIE') return 'CERTIFICAT';
-        if (t === 'FSE') return 'FSE';
-        if (t.startsWith('ANALYSES_') || ['ELECTROCARDIOGRAMME','SPIROMETRIE','DOSSIER_MEDICAL','PLAN_DE_SOINS','SUIVI_THERAPEUTIQUE','PSYCHOLOGIE','KINESITHERAPIE','DIETETIQUE','FICHE_DE_LIAISON','PROTOCOLE_URGENCE'].includes(t)) return 'COMPTE_RENDU';
-        return 'AUTRE';
-      };
-      const legacyType = mapLegacyType(newDocType);
+      
+      // legacyType est déjà calculé dans la validation ci-dessus
       if (legacyType) fd.append('type', legacyType);
-      // Optionnel: conserver le type détaillé (si ignoré côté back, non bloquant)
-      // fd.append('subcategory', newDocType);
-      // Associer le patient (certains back attendent l'id brut plutôt que l'IRI)
+      
+      // API Platform accepte soit l'IRI soit l'ID brut pour patient
+      // Essayer d'abord avec l'ID brut (comme dans Documents.jsx)
       fd.append('patient', String(id));
-      // Fallback titre si requis côté back
-      if (newDocFile?.name) {
-        fd.append('title', newDocFile.name);
-      }
+      
+      // Note: Pas de champ titre dans ce formulaire, donc pas d'original_name envoyé
+      // Le backend utilisera le nom du fichier par défaut
+      
       const created = await documentService.createDocument(fd);
       const doc = created?.data || created;
       // mettre à jour l'historique des documents
@@ -178,10 +272,92 @@ const PatientSingle = () => {
       setTimeout(() => setFlashMessage({ type: '', text: '' }), 3000);
       closeAddDoc();
     } catch (e) {
-      console.error('Erreur upload document:', e);
-      const errorMsg = e?.response?.data?.message || e?.message || "Échec de l'upload du document. Veuillez vérifier le format du fichier et réessayer.";
+      // Construire un message d'erreur plus clair
+      let errorMsg = "Échec de l'upload du document.";
+      
+      // Extraire les données de la réponse d'erreur
+      const responseData = e?.response?.data || {};
+      const violations = responseData.violations;
+      
+      // Calculer le type de document et les formats autorisés pour l'erreur
+      const allowedExtensions = {
+        'COMPTE_RENDU': ['pdf', 'doc', 'docx', 'txt'],
+        'ORDONNANCE': ['pdf', 'doc', 'docx', 'txt'],
+        'CERTIFICAT': ['pdf', 'doc', 'docx', 'txt'],
+        'RADIOGRAPHIE': ['pdf', 'jpg', 'jpeg', 'png', 'dicom'],
+        'FSE': ['pdf', 'xml'],
+        'CARTE_IDENTITE': ['pdf', 'jpg', 'jpeg', 'png'],
+        'CARTE_VITALE': ['pdf', 'jpg', 'jpeg', 'png'],
+        'CONTACTS_URGENCE': ['pdf', 'doc', 'docx', 'txt'],
+        'CARTE_MUTUELLE': ['pdf', 'jpg', 'jpeg', 'png'],
+        'AUTRE': ['pdf', 'doc', 'docx', 'txt', 'jpg', 'jpeg', 'png']
+      };
+      
+      const legacyType = (() => {
+        if (!newDocType) return 'AUTRE';
+        if (['CARTE_IDENTITE', 'CARTE_VITALE', 'CONTACTS_URGENCE', 'CARTE_MUTUELLE'].includes(newDocType)) return newDocType;
+        if (newDocType === 'ORDONNANCE' || newDocType === 'PRESCRIPTION_EXAMEN') return 'ORDONNANCE';
+        if (['RADIOGRAPHIE','ECHOGRAPHIE','ENDOSCOPIE','DERMATOSCOPIE'].includes(newDocType)) return 'RADIOGRAPHIE';
+        if (newDocType.startsWith('COMPTE_RENDU_')) return 'COMPTE_RENDU';
+        if (newDocType.startsWith('CERTIFICAT_') || newDocType === 'ATTESTATION_MALADIE') return 'CERTIFICAT';
+        if (newDocType === 'FSE') return 'FSE';
+        if (newDocType.startsWith('ANALYSES_') || ['ELECTROCARDIOGRAMME','SPIROMETRIE','DOSSIER_MEDICAL','PLAN_DE_SOINS','SUIVI_THERAPEUTIQUE','PSYCHOLOGIE','KINESITHERAPIE','DIETETIQUE','FICHE_DE_LIAISON','PROTOCOLE_URGENCE'].includes(newDocType)) return 'COMPTE_RENDU';
+        return 'AUTRE';
+      })();
+      
+      const allowedForType = allowedExtensions[legacyType] || allowedExtensions['AUTRE'];
+      const formatsAttendus = allowedForType.map(ext => `.${ext.toUpperCase()}`).join(', ');
+      const typeDocumentLabel = legacyType.toLowerCase().replace(/_/g, ' ');
+      
+      // Prioriser les messages d'erreur dans l'ordre de spécificité
+      if (responseData.message) {
+        errorMsg = responseData.message;
+      } else if (responseData.error) {
+        errorMsg = responseData.error;
+      } else if (violations && Array.isArray(violations) && violations.length > 0) {
+        // Si on a des violations, construire un message avec toutes les violations
+        const violationMessages = violations.map(v => v.message || v.title || 'Erreur de validation').join(' ; ');
+        errorMsg = `Erreur de validation : ${violationMessages}`;
+      } else if (responseData.detail) {
+        errorMsg = responseData.detail;
+      } else if (responseData.title) {
+        errorMsg = responseData.title;
+      } else if (e?.message) {
+        errorMsg = e.message;
+      }
+      
+      // Ajouter des informations supplémentaires selon le code de statut
+      if (e?.response?.status === 500) {
+        errorMsg = `Erreur serveur (500) : ${errorMsg}. Veuillez contacter l'administrateur si le problème persiste.`;
+      } else if (e?.response?.status === 413) {
+        errorMsg = `Fichier trop volumineux. ${errorMsg}`;
+      } else if (e?.response?.status === 400) {
+        errorMsg = `Données invalides : ${errorMsg}`;
+      }
+      
+      // Ajouter les formats attendus si c'est un problème de format ou de type
+      const isFormatError = errorMsg.toLowerCase().includes('format') || 
+                           errorMsg.toLowerCase().includes('type') || 
+                           errorMsg.toLowerCase().includes('extension') ||
+                           errorMsg.toLowerCase().includes('fichier') ||
+                           e?.response?.status === 400;
+      
+      if (isFormatError) {
+        errorMsg += ` Pour le type de document "${typeDocumentLabel}", les formats acceptés sont : ${formatsAttendus}.`;
+      }
+      
+      console.error('Erreur lors de l\'upload du document:', e);
+      console.error('Détails de l\'erreur:', {
+        status: e?.response?.status,
+        statusText: e?.response?.statusText,
+        data: responseData,
+        message: e?.message,
+        typeDocument: legacyType,
+        formatsAttendus: formatsAttendus
+      });
+      
       setFlashMessage({ type: 'error', text: errorMsg });
-      setTimeout(() => setFlashMessage({ type: '', text: '' }), 4000);
+      setTimeout(() => setFlashMessage({ type: '', text: '' }), 8000);
     } finally {
       setUploadingDoc(false);
     }
@@ -199,30 +375,115 @@ const PatientSingle = () => {
   });
   const [savingCouverture, setSavingCouverture] = useState(false);
   const [saveError, setSaveError] = useState('');
-  // Autocomplete mutuelle
+  // Autocomplete mutuelle avec debounce
   const [mutuelleQuery, setMutuelleQuery] = useState('');
-  const [mutuelleResults, setMutuelleResults] = useState([]);
-  const [mutuelleSearching, setMutuelleSearching] = useState(false);
-
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  
+  // Debounce de la requête
   useEffect(() => {
-    let active = true;
-    const run = async () => {
-      const q = mutuelleQuery.trim();
-      if (!q) { setMutuelleResults([]); return; }
-      try {
-        setMutuelleSearching(true);
-        const res = await mutuelleService.searchMutuelles(q, 8);
-        if (!active) return;
-        setMutuelleResults(Array.isArray(res?.mutuelles) ? res.mutuelles : []);
-      } catch (e) {
-        if (active) setMutuelleResults([]);
-      } finally {
-        if (active) setMutuelleSearching(false);
-      }
-    };
-    const t = setTimeout(run, 250);
-    return () => { active = false; clearTimeout(t); };
+    const timer = setTimeout(() => {
+      setDebouncedQuery(mutuelleQuery);
+    }, 250);
+    return () => clearTimeout(timer);
   }, [mutuelleQuery]);
+
+  // Recherche avec React Query
+  const { data: searchResult, isLoading: mutuelleSearching } = useSearchMutuelles(
+    debouncedQuery,
+    8,
+    debouncedQuery.trim().length > 0
+  );
+
+  // Trier les résultats par ordre alphabétique
+  const mutuelleResults = React.useMemo(() => {
+    if (!searchResult?.mutuelles) return [];
+    const mutuelles = Array.isArray(searchResult.mutuelles) ? searchResult.mutuelles : [];
+    return mutuelles.sort((a, b) => {
+      const nameA = (a.nom || a.name || '').toLowerCase().trim();
+      const nameB = (b.nom || b.name || '').toLowerCase().trim();
+      return nameA.localeCompare(nameB, 'fr', { sensitivity: 'base' });
+    });
+  }, [searchResult]);
+
+  // Fonction pour calculer le statut d'une couverture basé sur les dates et le booléen valide
+  const getCouvertureStatus = (couverture) => {
+    const now = new Date();
+    const dateDebut = couverture.dateDebut ? new Date(couverture.dateDebut) : null;
+    const dateFin = couverture.dateFin ? new Date(couverture.dateFin) : null;
+
+    // Si le booléen valide est explicitement false, la couverture est invalide
+    if (couverture.valide === false) {
+      return {
+        label: 'INVALIDE',
+        className: 'bg-red-100 text-red-800'
+      };
+    }
+
+    // Si on a des dates, on calcule le statut basé sur les dates
+    if (dateDebut && dateFin) {
+      if (dateFin < now) {
+        return {
+          label: 'EXPIRÉE',
+          className: 'bg-red-100 text-red-800'
+        };
+      } else if (dateDebut > now) {
+        return {
+          label: 'FUTURE',
+          className: 'bg-yellow-100 text-yellow-800'
+        };
+      } else if (dateDebut <= now && now <= dateFin) {
+        return {
+          label: 'VALIDE',
+          className: 'bg-green-100 text-green-800'
+        };
+      }
+    }
+
+    // Si on a seulement dateFin
+    if (dateFin && !dateDebut) {
+      if (dateFin < now) {
+        return {
+          label: 'EXPIRÉE',
+          className: 'bg-red-100 text-red-800'
+        };
+      } else {
+        return {
+          label: 'VALIDE',
+          className: 'bg-green-100 text-green-800'
+        };
+      }
+    }
+
+    // Si on a seulement dateDebut
+    if (dateDebut && !dateFin) {
+      if (dateDebut > now) {
+        return {
+          label: 'FUTURE',
+          className: 'bg-yellow-100 text-yellow-800'
+        };
+      } else {
+        return {
+          label: 'VALIDE',
+          className: 'bg-green-100 text-green-800'
+        };
+      }
+    }
+
+    // Si pas de dates, on se base sur le booléen valide
+    if (couverture.valide === true) {
+      return {
+        label: 'VALIDE',
+        className: 'bg-green-100 text-green-800'
+      };
+    }
+
+    // Par défaut, statut inconnu
+    return {
+      label: 'NON RENSEIGNÉ',
+      className: 'bg-gray-100 text-gray-800'
+    };
+  };
+
 
   const openEditCouverture = (c) => {
     setEditingCouverture(c);
@@ -340,40 +601,175 @@ const PatientSingle = () => {
     }
   };
 
-  // Fonctions utilitaires
-  const formatDate = (dateString) => {
-    if (!dateString) return '—';
-    return new Date(dateString).toLocaleString('fr-FR');
-  };
 
-  const formatFileSize = (bytes) => {
-    if (!bytes) return '—';
-    const sizes = ['B', 'KB', 'MB', 'GB'];
-    const i = Math.floor(Math.log(bytes) / Math.log(1024));
-    return Math.round(bytes / Math.pow(1024, i) * 100) / 100 + ' ' + sizes[i];
-  };
-
-  // Fonction pour charger les documents du patient
-  const loadPatientDocuments = async () => {
+  // OPTIMISATION: Charger documents et audios en UN SEUL appel API
+  const loadPatientDocumentsAndAudios = async () => {
+    if (!id) {
+      setDocuments([]);
+      setAudios([]);
+      return;
+    }
+    
     try {
+      // UN SEUL appel API pour tous les documents
       setDocumentsLoading(true);
+      setAudiosLoading(true);
       setDocumentsError('');
-      if (!id) {
-        setDocuments([]);
-        return;
-      }
-      const documentsData = await documentService.getDocuments({ 
+      setAudiosError('');
+      
+      const allDocumentsData = await documentService.getDocuments({ 
         'patient.id': id,
         "order[uploadedAt]": "desc",
-        limit: 50
+        limit: 50 // Limite maximale recommandée (ne pas dépasser pour éviter la surcharge backend)
       });
-      setDocuments(Array.isArray(documentsData) ? documentsData : []);
+      
+      const allDocs = Array.isArray(allDocumentsData) ? allDocumentsData : [];
+      
+      // Séparer en documents normaux et audios en une seule passe
+      const normalDocs = [];
+      const audioDocs = [];
+      
+      for (const doc of allDocs) {
+        const mimeType = (doc.mimeType || doc.mime_type || '').toLowerCase();
+        const type = (doc.type || '').toUpperCase();
+        const isAudio = mimeType.startsWith('audio/') || type === 'AUDIO_MEDECIN' || type === 'TRANSCRIPTION_AUDIO';
+        
+        if (isAudio) {
+          audioDocs.push(doc);
+        } else {
+          normalDocs.push(doc);
+        }
+      }
+      
+      setDocuments(normalDocs);
+      setAudios(audioDocs);
     } catch (error) {
       console.error('Erreur lors du chargement des documents:', error);
       setDocuments([]);
+      setAudios([]);
       setDocumentsError("Impossible de charger les documents du patient. Réessayez plus tard.");
+      setAudiosError("Impossible de charger les enregistrements audio. Réessayez plus tard.");
     } finally {
       setDocumentsLoading(false);
+      setAudiosLoading(false);
+    }
+  };
+
+  // Alias pour compatibilité (anciennes fonctions)
+  const loadPatientDocuments = loadPatientDocumentsAndAudios;
+  const loadPatientAudios = loadPatientDocumentsAndAudios;
+
+  // Fonction pour uploader un enregistrement audio
+  const submitAddAudio = async () => {
+    if (!newAudioFile || !id) return;
+    
+    // Validation du format audio ou transcription
+    const fileName = newAudioFile.name || '';
+    const fileExtension = fileName.split('.').pop()?.toLowerCase() || '';
+    const allowedAudioExtensions = ['mp3', 'wav', 'm4a', 'ogg', 'webm'];
+    // Formats de transcription/retranscription courants
+    const allowedTranscriptionExtensions = ['txt', 'srt', 'vtt', 'docx', 'pdf', 'json', 'xml'];
+    const allAllowedExtensions = [...allowedAudioExtensions, ...allowedTranscriptionExtensions];
+    
+    if (!allAllowedExtensions.includes(fileExtension)) {
+      setFlashMessage({ 
+        type: 'error', 
+        text: `Format non autorisé. Formats acceptés : Audio (${allowedAudioExtensions.map(ext => `.${ext.toUpperCase()}`).join(', ')}) ou Transcription (${allowedTranscriptionExtensions.map(ext => `.${ext.toUpperCase()}`).join(', ')})` 
+      });
+      setTimeout(() => setFlashMessage({ type: '', text: '' }), 4000);
+      return;
+    }
+    
+    try {
+      setUploadingAudio(true);
+      const fd = new FormData();
+      fd.append('file', newAudioFile, newAudioFile.name);
+      
+      // Déterminer le type selon l'extension
+      const isTranscription = allowedTranscriptionExtensions.includes(fileExtension);
+      fd.append('type', isTranscription ? 'TRANSCRIPTION_AUDIO' : 'AUDIO_MEDECIN');
+      fd.append('patient', String(id));
+      
+      // Note: Pas de champ titre pour les audios, donc pas d'original_name envoyé
+      // Le backend utilisera le nom du fichier par défaut
+      
+      const created = await documentService.createDocument(fd);
+      const audioDoc = created?.data || created;
+      // Recharger la liste des audios pour avoir les données complètes
+      await loadPatientAudios();
+      setFlashMessage({ type: 'success', text: 'Enregistrement audio ajouté avec succès.' });
+      setTimeout(() => setFlashMessage({ type: '', text: '' }), 3000);
+      closeAddAudio();
+    } catch (e) {
+      let errorMsg = "Échec de l'upload de l'enregistrement audio.";
+      if (e?.response?.data?.message) {
+        errorMsg = e.response.data.message;
+      } else if (e?.response?.data?.error) {
+        errorMsg = e.response.data.error;
+      } else if (e?.message) {
+        errorMsg = e.message;
+      }
+      setFlashMessage({ type: 'error', text: errorMsg });
+      setTimeout(() => setFlashMessage({ type: '', text: '' }), 4000);
+    } finally {
+      setUploadingAudio(false);
+    }
+  };
+
+  // Fonction pour uploader une transcription
+  const submitAddTranscription = async () => {
+    if (!newTranscriptionFile || !id || !selectedAudioForTranscription) return;
+    
+    // Validation du format transcription
+    const fileName = newTranscriptionFile.name || '';
+    const fileExtension = fileName.split('.').pop()?.toLowerCase() || '';
+    const allowedTranscriptionExtensions = ['txt', 'srt', 'vtt', 'docx', 'pdf', 'json', 'xml'];
+    
+    if (!allowedTranscriptionExtensions.includes(fileExtension)) {
+      setFlashMessage({ 
+        type: 'error', 
+        text: `Format non autorisé. Formats acceptés : ${allowedTranscriptionExtensions.map(ext => `.${ext.toUpperCase()}`).join(', ')}` 
+      });
+      setTimeout(() => setFlashMessage({ type: '', text: '' }), 4000);
+      return;
+    }
+    
+    try {
+      setUploadingTranscription(true);
+      const fd = new FormData();
+      fd.append('file', newTranscriptionFile, newTranscriptionFile.name);
+      fd.append('type', 'TRANSCRIPTION_AUDIO');
+      fd.append('patient', String(id));
+      
+      // Ajouter un tag pour lier la transcription à l'audio source
+      const audioId = selectedAudioForTranscription.id || selectedAudioForTranscription['@id'];
+      if (audioId) {
+        fd.append('tags', JSON.stringify({ audioSource: audioId }));
+      }
+      
+      // Note: Pas de champ titre pour les transcriptions, donc pas d'original_name envoyé
+      // Le backend utilisera le nom du fichier par défaut
+      
+      const created = await documentService.createDocument(fd);
+      const transcriptionDoc = created?.data || created;
+      // Recharger la liste des audios pour avoir les données complètes
+      await loadPatientAudios();
+      setFlashMessage({ type: 'success', text: 'Transcription ajoutée avec succès.' });
+      setTimeout(() => setFlashMessage({ type: '', text: '' }), 3000);
+      closeAddTranscription();
+    } catch (e) {
+      let errorMsg = "Échec de l'upload de la transcription.";
+      if (e?.response?.data?.message) {
+        errorMsg = e.response.data.message;
+      } else if (e?.response?.data?.error) {
+        errorMsg = e.response.data.error;
+      } else if (e?.message) {
+        errorMsg = e.message;
+      }
+      setFlashMessage({ type: 'error', text: errorMsg });
+      setTimeout(() => setFlashMessage({ type: '', text: '' }), 4000);
+    } finally {
+      setUploadingTranscription(false);
     }
   };
 
@@ -393,13 +789,19 @@ const PatientSingle = () => {
     }
   };
 
-  // Historique des rendez-vous du patient
+  // Historique des rendez-vous du patient (OPTIMISÉ: limite réduite pour chargement plus rapide)
   const loadPatientRdvHistory = async () => {
     if (!id) { setRdvs([]); return; }
     try {
       setRdvsLoading(true);
       setRdvsError('');
-      const list = await appointmentService.getAllAppointmentsHistory({ 'patient.id': id, "order[startAt]": 'desc', limit: 50 });
+      // OPTIMISATION: Limite réduite à 30 pour chargement plus rapide
+      // Les RDV supplémentaires peuvent être chargés via pagination si nécessaire
+      const list = await appointmentService.getAllAppointmentsHistory({ 
+        patientId: id, 
+        limit: 30, // Réduit de 50 à 30 pour accélérer
+        page: 1
+      });
       setRdvs(Array.isArray(list) ? list : []);
     } catch (e) {
       setRdvs([]);
@@ -425,71 +827,58 @@ const PatientSingle = () => {
   };
 
   const initFetched = useRef(false);
+  const currentPatientId = useRef(null);
 
-  // Fonction pour obtenir les classes de badge selon le statut (alignée avec Appointments.jsx)
+  // Utiliser l'utilitaire centralisé pour les classes de badge
   const getStatusBadgeClasses = (statut) => {
-    if (!statut) return 'bg-gray-100 text-gray-800';
-    const statutUpper = statut.toUpperCase();
-    switch (statutUpper) {
-      case 'EN_ATTENTE': return 'bg-yellow-100 text-yellow-800';
-      case 'PLANIFIE': return 'bg-blue-100 text-blue-800';
-      case 'CONFIRME': return 'bg-green-100 text-green-800';
-      case 'ANNULE': return 'bg-red-100 text-red-800';
-      case 'ABSENT': return 'bg-red-600 text-white font-bold';
-      case 'TERMINE': return 'bg-gray-100 text-gray-800';
-      default: return 'bg-blue-100 text-blue-800';
-    }
+    return getAppointmentStatusClasses(statut).badge;
   };
 
-  // Réinitialiser la pagination quand les RDV sont rechargés
+  // Réinitialiser la pagination quand on change de patient
   useEffect(() => {
-    if (rdvs.length > 0) {
-      setRdvCurrentPage(1);
-    }
-  }, [id]); // Réinitialiser quand on change de patient
+    setRdvCurrentPage(1);
+  }, [id]);
 
   useEffect(() => {
     const loadPatient = async () => {
       try {
         setLoading(true);
+        setError(null);
         
-        // Charger les données principales ET une liste pour compléter certains champs manquants (ex: genre)
-        const [patientData, allPatients] = await Promise.all([
-          patientService.getOnePatient(id),
-          patientService.getAllPatients().catch(() => [])
-        ]);
-        const listPatients = Array.isArray(allPatients) ? allPatients : [];
-        const patientFromList = listPatients.find(p => String(p?.id) === String(id));
-        const mappedPatient = {
-          ...patientData,
-          genre: patientData?.genre || patientFromList?.genre,
-        };
-        setPatient(mappedPatient);
+        // OPTIMISATION: Charger uniquement le patient demandé (suppression de getAllPatients() inutile)
+        const patientData = await patientService.getOnePatient(id);
+        setPatient(patientData);
         
-        // Marquer le chargement principal comme terminé
+        // Marquer le chargement principal comme terminé IMMÉDIATEMENT
         setLoading(false);
         
-        // Charger les données secondaires en arrière-plan (non bloquant)
-        // Couvertures
+        // OPTIMISATION: Charger les données par priorité
+        // 1. Données critiques (couvertures) - chargées en premier
         setCouverturesLoading(true);
         setCouverturesError('');
         patientService.getPatientCouvertures(id)
-          .then(couvertures => setCouvertures(couvertures))
+          .then(couvertures => {
+            setCouvertures(Array.isArray(couvertures) ? couvertures : []);
+            setCouverturesLoading(false);
+          })
           .catch(error => {
             console.error('Erreur lors du chargement des couvertures:', error);
             setCouvertures([]);
             setCouverturesError("Impossible de charger les couvertures mutuelles.");
-          })
-          .finally(() => setCouverturesLoading(false));
+            setCouverturesLoading(false);
+          });
         
-        // Documents
-        loadPatientDocuments();
-        // Hospitalisations (non bloquant)
-        loadPatientHospitalisations();
-        // RDV (non bloquant)
-        loadPatientRdvHistory();
-        // Justificatifs (non bloquant)
-        loadPatientJustificatifs();
+        // 2. Documents et audios (UN SEUL appel API maintenant)
+        loadPatientDocumentsAndAudios();
+        
+        // 3. Données moins critiques chargées en parallèle (non bloquant)
+        Promise.allSettled([
+          loadPatientHospitalisations(),
+          loadPatientRdvHistory(),
+          loadPatientJustificatifs()
+        ]).catch(() => {
+          // Les erreurs individuelles sont déjà gérées dans chaque fonction
+        });
         
       } catch (error) {
         console.error('Erreur lors du chargement du patient:', error);
@@ -497,6 +886,12 @@ const PatientSingle = () => {
         setLoading(false);
       }
     };
+
+    // Réinitialiser le flag si l'ID change
+    if (id && currentPatientId.current !== id) {
+      initFetched.current = false;
+      currentPatientId.current = id;
+    }
 
     if (id && !initFetched.current) {
       initFetched.current = true;
@@ -510,8 +905,8 @@ const PatientSingle = () => {
 
   if (error && !loading) {
     return (
-      <div className="min-h-screen bg-orange-100 p-6">
-        <div className="max-w-7xl mx-auto">
+      <div className="min-h-screen bg-orange-100 w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6">
+        <div className="w-full">
           <ErrorMessage 
             message={error} 
             title="Erreur de chargement"
@@ -557,7 +952,7 @@ const PatientSingle = () => {
   }
 
   return (
-    <div className="space-y-6 bg-orange-100 min-h-screen p-6">
+    <div className="space-y-6 bg-orange-100 min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6">
       <div className="max-w-4xl mx-auto px-4">
         {/* Flash message */}
         {flashMessage.text && (
@@ -566,7 +961,6 @@ const PatientSingle = () => {
           </div>
         )}
 
-        {/* Debug retiré */}
 
         {/* Header */}
         <div className="bg-orange-200 rounded-lg shadow-md p-6 mb-6">
@@ -579,8 +973,8 @@ const PatientSingle = () => {
               </div>
               <div className="space-y-2">
                 <div className="flex items-center gap-3 flex-wrap">
-                  <h1 className="text-3xl font-bold text-orange-800">
-                    {patient.prenom} {patient.nom}
+                  <h1 className="text-2xl font-bold text-orange-800">
+                    <PatientName patient={patient} showGenre={false} />
                   </h1>
                   {patientStatus && (
                     <span className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-sm font-semibold ${patientStatus.badgeClass}`}>
@@ -597,14 +991,14 @@ const PatientSingle = () => {
                 onClick={() => navigate(`/patients/${patient.id}/modifier`)}
                 className="bg-orange-600 hover:bg-orange-700 text-white px-4 py-2 rounded-lg transition-colors inline-flex items-center gap-2"
               >
-                <span className="material-symbols-rounded text-white text-base">edit</span>
+                <span className="material-symbols-rounded text-white text-2xl">edit</span>
                 Modifier patient
               </button>
               <button
                 onClick={() => navigate('/patients')}
                 className="bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded-lg transition-colors inline-flex items-center gap-2"
               >
-                <span className="material-symbols-rounded text-white text-base">arrow_back</span>
+                <span className="material-symbols-rounded text-white text-2xl">arrow_back</span>
                 Retour à la liste
               </button>
             </div>
@@ -613,7 +1007,7 @@ const PatientSingle = () => {
 
         {isPatientDeceased && (
           <div className="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg mb-6 flex items-start gap-3">
-            <span className="text-xl leading-none">⚰️</span>
+            <span className="text-2xl leading-none">⚰️</span>
             <div>
               <p className="font-semibold">Patient déclaré décédé</p>
               <p className="text-sm">La programmation de nouveaux rendez-vous est désactivée pour ce patient. Consultez le dossier uniquement.</p>
@@ -629,7 +1023,7 @@ const PatientSingle = () => {
                 {justificatifsStatus.dossierComplet ? 'check_circle' : 'warning'}
               </span>
               <div className="flex-1">
-                <h3 className={`text-lg font-semibold mb-1 ${justificatifsStatus.dossierComplet ? 'text-green-800' : 'text-yellow-800'}`}>
+                <h3 className={`text-2xl font-semibold mb-1 ${justificatifsStatus.dossierComplet ? 'text-green-800' : 'text-yellow-800'}`}>
                   {justificatifsStatus.dossierComplet ? 'Dossier complet' : 'Dossier incomplet'}
                 </h3>
                 <p className={`text-sm ${justificatifsStatus.dossierComplet ? 'text-green-700' : 'text-yellow-700'}`}>
@@ -643,28 +1037,32 @@ const PatientSingle = () => {
             <div className="mt-4">
               <h4 className="text-sm font-semibold text-gray-800 mb-3">Justificatifs requis</h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {justificatifsStatus.justificatifs.map((justificatif) => (
-                  <div
-                    key={justificatif.type}
-                    className={`flex items-center justify-between p-3 rounded-lg border ${
-                      justificatif.present 
-                        ? 'bg-white border-green-200' 
-                        : 'bg-red-50 border-red-200'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      <span className={`material-symbols-rounded ${justificatif.present ? 'text-green-600' : 'text-red-600'}`}>
-                        {justificatif.present ? 'check_circle' : 'cancel'}
-                      </span>
-                      <span className={`text-sm font-medium ${justificatif.present ? 'text-gray-800' : 'text-red-700'}`}>
-                        {justificatif.label}
+                {justificatifsStatus.justificatifs.map((justificatif) => {
+                  // Normaliser le label : remplacer "Formulaire de contacts d'urgence" par "Contact d'urgence"
+                  const normalizedLabel = justificatif.label?.replace(/Formulaire de contacts? d'urgence/i, "Contact d'urgence") || justificatif.label;
+                  return (
+                    <div
+                      key={justificatif.type}
+                      className={`flex items-center justify-between p-3 rounded-lg border ${
+                        justificatif.present 
+                          ? 'bg-white border-green-200' 
+                          : 'bg-red-50 border-red-200'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className={`material-symbols-rounded ${justificatif.present ? 'text-green-600' : 'text-red-600'}`}>
+                          {justificatif.present ? 'check_circle' : 'cancel'}
+                        </span>
+                        <span className={`text-sm font-medium ${justificatif.present ? 'text-gray-800' : 'text-red-700'}`}>
+                          {normalizedLabel}
+                        </span>
+                      </div>
+                      <span className={`text-xs font-semibold px-2 py-1 rounded ${justificatif.present ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
+                        {justificatif.present ? 'Présent' : 'Manquant'}
                       </span>
                     </div>
-                    <span className={`text-xs font-semibold px-2 py-1 rounded ${justificatif.present ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'}`}>
-                      {justificatif.present ? 'Présent' : 'Manquant'}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
               
               {justificatifsStatus.justificatifsManquants.length > 0 && (
@@ -673,7 +1071,7 @@ const PatientSingle = () => {
                     onClick={() => navigate(`/documents?patient=${id}`)}
                     className="text-sm text-blue-600 hover:text-blue-800 font-medium flex items-center gap-1"
                   >
-                    <span className="material-symbols-rounded text-base">upload_file</span>
+                    <span className="material-symbols-rounded text-2xl">upload_file</span>
                     Ajouter les justificatifs manquants
                   </button>
                 </div>
@@ -685,7 +1083,7 @@ const PatientSingle = () => {
         {justificatifsLoading && (
           <div className="mb-6 bg-gray-50 border border-gray-200 rounded-lg p-4">
             <div className="flex items-center gap-2 text-gray-600">
-              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-gray-600"></div>
+              <LoadingSpinner color="gray" size="small" inline={true} />
               <span className="text-sm">Chargement du statut des justificatifs...</span>
             </div>
           </div>
@@ -694,7 +1092,7 @@ const PatientSingle = () => {
         {/* Informations personnelles */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           <div className="bg-orange-50 rounded-lg shadow-md p-6">
-            <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+            <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
               <span className="material-symbols-rounded text-blue-600">badge</span>
               Informations personnelles
             </h2>
@@ -704,7 +1102,7 @@ const PatientSingle = () => {
                 <span className="font-medium">
                   {!patient.genre ? (
                     <span className="text-red-600 font-bold inline-flex items-center gap-1">
-                      <span className="material-symbols-rounded text-red-600 text-base">error</span>
+                      <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
                       MANQUANT
                     </span>
                   ) : patient.genre === 'Mr' || patient.genre === 'M' ? (
@@ -713,7 +1111,7 @@ const PatientSingle = () => {
                     'Mme'
                   ) : (
                     <span className="text-orange-600 font-bold inline-flex items-center gap-1">
-                      <span className="material-symbols-rounded text-orange-600 text-base">warning</span>
+                      <span className="material-symbols-rounded text-orange-600 text-2xl">warning</span>
                       {patient.genre}
                     </span>
                   )}
@@ -741,7 +1139,7 @@ const PatientSingle = () => {
           </div>
 
           <div className="bg-orange-50 rounded-lg shadow-md p-6">
-            <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+            <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
               <span className="material-symbols-rounded text-green-600">call</span>
               Contact
             </h2>
@@ -751,7 +1149,7 @@ const PatientSingle = () => {
                 <span className="font-medium">
                   {patient.email ? patient.email : (
                     <span className="text-red-600 font-bold inline-flex items-center gap-1">
-                      <span className="material-symbols-rounded text-red-600 text-base">error</span>
+                      <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
                       MANQUANT
                     </span>
                   )}
@@ -762,17 +1160,54 @@ const PatientSingle = () => {
                 <span className="font-medium">
                   {patient.telephone ? patient.telephone : (
                     <span className="text-red-600 font-bold inline-flex items-center gap-1">
-                      <span className="material-symbols-rounded text-red-600 text-base">error</span>
+                      <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
                       MANQUANT
                     </span>
                   )}
                 </span>
               </div>
+              <div className="border-t border-orange-200 pt-3 mt-3">
+                <h3 className="text-lg font-semibold text-gray-700 mb-2">
+                  Contact d'urgence
+                </h3>
+                <div className="space-y-2">
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Nom :</span>
+                    <span className="font-medium">
+                      {patient.contactUrgenceNom ? (
+                        <span className="text-gray-800">
+                          {patient.contactUrgenceNom}
+                        </span>
+                      ) : (
+                        <span className="text-red-600 font-bold inline-flex items-center gap-1">
+                          <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
+                          MANQUANT
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-600">Téléphone :</span>
+                    <span className="font-medium">
+                      {patient.contactUrgenceTelephone ? (
+                        <span className="text-gray-800">
+                          {patient.contactUrgenceTelephone}
+                        </span>
+                      ) : (
+                        <span className="text-red-600 font-bold inline-flex items-center gap-1">
+                          <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
+                          MANQUANT
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
           <div className="bg-orange-50 rounded-lg shadow-md p-6">
-            <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+            <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
               <span className="material-symbols-rounded text-purple-600">home_pin</span>
               Adresse
             </h2>
@@ -782,7 +1217,7 @@ const PatientSingle = () => {
                 <span className="font-medium">
                   {patient.adresseL1 ? patient.adresseL1 : (
                     <span className="text-red-600 font-bold inline-flex items-center gap-1">
-                      <span className="material-symbols-rounded text-red-600 text-base">error</span>
+                      <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
                       MANQUANT
                     </span>
                   )}
@@ -799,7 +1234,7 @@ const PatientSingle = () => {
                 <span className="font-medium">
                   {patient.ville ? patient.ville : (
                     <span className="text-red-600 font-bold inline-flex items-center gap-1">
-                      <span className="material-symbols-rounded text-red-600 text-base">error</span>
+                      <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
                       MANQUANT
                     </span>
                   )}
@@ -810,7 +1245,7 @@ const PatientSingle = () => {
                 <span className="font-medium">
                   {patient.codePostal ? patient.codePostal : (
                     <span className="text-red-600 font-bold inline-flex items-center gap-1">
-                      <span className="material-symbols-rounded text-red-600 text-base">error</span>
+                      <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
                       MANQUANT
                     </span>
                   )}
@@ -820,7 +1255,7 @@ const PatientSingle = () => {
           </div>
 
           <div className="bg-orange-50 rounded-lg shadow-md p-6">
-            <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+            <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
               <span className="material-symbols-rounded text-orange-600">health_and_safety</span>
               Sécurité sociale
             </h2>
@@ -830,7 +1265,7 @@ const PatientSingle = () => {
                 <span className="font-medium">
                   {patient.numeroSecu ? patient.numeroSecu : (
                     <span className="text-red-600 font-bold inline-flex items-center gap-1">
-                      <span className="material-symbols-rounded text-red-600 text-base">error</span>
+                      <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
                       MANQUANT
                     </span>
                   )}
@@ -841,7 +1276,7 @@ const PatientSingle = () => {
                 <span className="font-medium">
                   {patient.organismeSecu ? patient.organismeSecu : (
                     <span className="text-red-600 font-bold inline-flex items-center gap-1">
-                      <span className="material-symbols-rounded text-red-600 text-base">error</span>
+                      <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
                       MANQUANT
                     </span>
                   )}
@@ -853,26 +1288,29 @@ const PatientSingle = () => {
 
         {/* Couvertures mutuelles */}
         <div className="bg-orange-50 rounded-lg shadow-md p-6 mt-6">
-          <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center justify-between">
-            <span className="material-symbols-rounded text-green-600">business_center</span>
-            <span className="flex items-center gap-2">
-              <span>Couvertures mutuelles</span>
-              {couverturesLoading && (
-                <div className="ml-2 animate-spin rounded-full h-4 w-4 border-b-2 border-orange-500"></div>
-              )}
-            </span>
-            <button onClick={openAddCouverture} className="bg-orange-600 hover:bg-orange-700 text-white px-3 py-1 rounded text-sm transition-colors inline-flex items-center gap-1">
-              <span className="material-symbols-rounded text-white text-base">add</span>
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+              <span className="material-symbols-rounded text-green-600">business_center</span>
+              <span className="flex items-center gap-2">
+                <span>Couvertures mutuelles</span>
+                {couverturesLoading && (
+                  <LoadingSpinner color="orange" size="small" inline={true} />
+                )}
+              </span>
+            </h2>
+            <button
+              onClick={openAddCouverture}
+              className="bg-orange-600 hover:bg-orange-700 text-white px-3 py-1 rounded-lg text-sm transition-colors inline-flex items-center gap-2 h-9"
+            >
+              <span className="material-symbols-rounded text-white text-lg">add</span>
               Ajouter
             </button>
-          </h2>
+          </div>
           {couverturesError && (
             <div className="mb-3 bg-red-100 border border-red-300 text-red-800 px-3 py-2 rounded text-sm">{couverturesError}</div>
           )}
           {couverturesLoading ? (
-            <div className="flex justify-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-orange-500"></div>
-            </div>
+            <LoadingSpinner color="orange" message="" />
           ) : couvertures.length > 0 ? (
             <div className="space-y-4">
               {couvertures.map((couverture, index) => (
@@ -901,19 +1339,20 @@ const PatientSingle = () => {
                     <div className="md:col-span-2 flex items-center justify-between">
                       <div>
                         <span className="text-gray-600 font-medium">Statut :</span>
-                        <span className={`ml-2 px-2 py-1 rounded-full text-sm ${
-                          couverture.valide 
-                            ? 'bg-green-100 text-green-800' 
-                            : 'bg-red-100 text-red-800'
-                        }`}>
-                          {couverture.valide ? 'Valide' : 'Expirée'}
-                        </span>
+                        {(() => {
+                          const status = getCouvertureStatus(couverture);
+                          return (
+                            <span className={`ml-2 px-2 py-1 rounded-full text-sm font-medium ${status.className}`}>
+                              {status.label}
+                            </span>
+                          );
+                        })()}
                       </div>
                       <div>
                         <button
                           onClick={() => openEditCouverture(couverture)}
                           className="bg-orange-600 hover:bg-orange-700 text-white px-3 py-1 rounded text-sm transition-colors"
-                        >
+                          >
                           Modifier
                         </button>
                       </div>
@@ -931,20 +1370,87 @@ const PatientSingle = () => {
           )}
         </div>
 
+          {/* Notes médicales */}
+          {patient.notes && (
+            <div className="bg-orange-50 rounded-lg shadow-md p-6 mt-6">
+              <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+                <span className="material-symbols-rounded text-red-600">note_alt</span>
+                Notes médicales
+              </h2>
+              {(() => {
+                const n = patient?.notes ?? {};
+                if (typeof n === 'string') {
+                  return (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div className="bg-white rounded-lg shadow p-4">
+                        <h3 className="text-sm font-semibold text-gray-700 mb-2">Notes générales</h3>
+                        <p className="text-gray-700 whitespace-pre-wrap">{n}</p>
+                      </div>
+                    </div>
+                  );
+                }
+  
+                const sections = [
+                  {
+                    label: 'Antécédents médicaux',
+                    value: n.antecedents || n.antecedantsMedicaux || ''
+                  },
+                  {
+                    label: 'Allergies',
+                    value: n.allergies || ''
+                  },
+                  {
+                    label: 'Traitements en cours',
+                    value: n.traitements || n.traitementEnCours || ''
+                  },
+                  {
+                    label: 'Autres informations',
+                    value: n.autres || n.autresInformations || ''
+                  }
+                ];
+  
+                return (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {sections.map(({ label, value }) => (
+                      <div key={label} className="bg-white rounded-lg shadow p-4">
+                        <h3 className="text-sm font-semibold text-gray-700 mb-2">{label}</h3>
+                        <p className="text-gray-700 whitespace-pre-wrap">{value ? value : '—'}</p>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
+          )}
+
         {/* Documents du patient */}
         <div className="bg-orange-50 rounded-lg shadow-md p-6 mt-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold text-gray-800 flex items-center gap-2">
+            <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
               <span className="material-symbols-rounded text-green-600">description</span>
               Documents du patient
             </h2>
             <button
               onClick={() => setShowAddDoc(true)}
-              className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded text-sm transition-colors inline-flex items-center gap-1"
+              className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 rounded-lg text-sm transition-colors inline-flex items-center gap-2 h-9"
             >
-              <span className="material-symbols-rounded text-white text-base">upload_file</span>
+              <span className="material-symbols-rounded text-white text-lg">upload_file</span>
               Ajouter
             </button>
+          </div>
+          
+          {/* Message informatif sur les formats supportés */}
+          <div className="mb-4 bg-blue-50 border border-blue-200 rounded-lg p-3">
+            <div className="flex items-start gap-2">
+              <span className="material-symbols-rounded text-blue-600 text-2xl">info</span>
+              <div className="flex-1">
+                <p className="text-blue-800 text-sm font-medium mb-1">Formats supportés en prévisualisation</p>
+                <p className="text-blue-700 text-xs">
+                  Vous pouvez prévisualiser directement : <strong>Images</strong> (PNG, JPG, GIF, WebP), <strong>PDF</strong>, <strong>Fichiers texte</strong> (TXT, MD, CSV, JSON, XML, HTML, CSS, JS) et <strong>Audio</strong> (MP3, WAV, OGG, M4A, FLAC, AAC).
+                  Pour les autres formats (Word, Excel, archives, etc.), utilisez le bouton <strong>Télécharger</strong>.
+                </p>
+              </div>
+            </div>
           </div>
           
           <div className="overflow-auto pr-2 pb-6" style={{ maxHeight: 'calc(100vh - 320px)' }}>
@@ -952,9 +1458,7 @@ const PatientSingle = () => {
               <div className="mb-3 bg-red-100 border border-red-300 text-red-800 px-3 py-2 rounded text-sm">{documentsError}</div>
             )}
             {documentsLoading ? (
-              <div className="flex justify-center py-8">
-                <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-500"></div>
-              </div>
+              <LoadingSpinner color="green" message="" />
             ) : documents.length > 0 ? (
               <div className="space-y-4">
               {documents.map((doc) => {
@@ -964,7 +1468,7 @@ const PatientSingle = () => {
                 const fileSize = doc.size || 0;
                 const uploadedBy = doc.uploadedBy;
                 const uploadedByName = uploadedBy ? `${uploadedBy.prenom || uploadedBy.firstName || ''} ${uploadedBy.nom || uploadedBy.lastName || ''}`.trim() : "Utilisateur inconnu";
-                const isArchived = doc.archivedAt;
+                const isArchived = doc.archivedAt || doc.is_archived || doc.archived === true;
 
                 return (
                   <div key={doc.id || doc['@id']} className="bg-white p-4 rounded-lg border border-gray-200 hover:shadow-md transition-shadow">
@@ -983,9 +1487,9 @@ const PatientSingle = () => {
                             </span>
                           </div>
                           <div className="text-xs text-gray-500 space-y-1">
-                            <div>{fileName} • {formatFileSize(fileSize)} • {mimeType}</div>
+                            <div>{formatFileSize(fileSize)} • {mimeType}</div>
                             <div>
-                              Ajouté le {formatDate(doc.uploadedAt || doc.uploaded_at)}
+                              Ajouté le {formatDateTime(doc.uploadedAt || doc.uploaded_at)}
                               {uploadedByName && ` par ${uploadedByName}`}
                             </div>
                             {doc.contenu && (
@@ -999,21 +1503,83 @@ const PatientSingle = () => {
                           {doc.type || 'Type inconnu'}
                         </span>
                         <button
-                          onClick={() => {
-                            // Fonction de téléchargement (à implémenter)
+                          onClick={async () => {
+                            try {
+                              const blob = await documentService.downloadDocument(doc.id || doc['@id']);
+                              if (blob) {
+                                const url = URL.createObjectURL(blob);
+                                const a = document.createElement('a');
+                                a.href = url;
+                                a.download = title;
+                                document.body.appendChild(a);
+                                a.click();
+                                a.remove();
+                                setTimeout(() => URL.revokeObjectURL(url), 1000);
+                              } else {
+                                setFlashMessage({ type: 'error', text: 'Impossible de télécharger le document.' });
+                                setTimeout(() => setFlashMessage({ type: '', text: '' }), 3000);
+                              }
+                            } catch (e) {
+                              console.error('Erreur lors du téléchargement:', e);
+                              setFlashMessage({ type: 'error', text: 'Erreur lors du téléchargement du document.' });
+                              setTimeout(() => setFlashMessage({ type: '', text: '' }), 3000);
+                            }
                           }}
                           className="p-2 text-green-600 hover:text-green-800 hover:bg-green-100 rounded-lg transition-colors inline-flex items-center"
                           title="Télécharger"
                         >
-                          <span className="material-symbols-rounded text-base">download</span>
+                          <span className="material-symbols-rounded text-2xl">download</span>
                         </button>
                         <button
                           onClick={() => { openPreview(doc); }}
                           className="p-2 text-blue-600 hover:text-blue-800 hover:bg-blue-100 rounded-lg transition-colors inline-flex items-center"
                           title="Voir"
                         >
-                          <span className="material-symbols-rounded text-base">visibility</span>
+                          <span className="material-symbols-rounded text-2xl">visibility</span>
                         </button>
+                        {isArchived ? (
+                          <button
+                            onClick={async () => {
+                              if (!confirm('Voulez-vous restaurer ce document archivé ?')) return;
+                              try {
+                                await documentService.restoreDocument(doc.id || doc['@id']);
+                                // Recharger les documents pour mettre à jour le statut
+                                await loadPatientDocumentsAndAudios();
+                                setFlashMessage({ type: 'success', text: 'Document restauré avec succès.' });
+                                setTimeout(() => setFlashMessage({ type: '', text: '' }), 3000);
+                              } catch (e) {
+                                console.error('Erreur lors de la restauration:', e);
+                                setFlashMessage({ type: 'error', text: 'Erreur lors de la restauration du document.' });
+                                setTimeout(() => setFlashMessage({ type: '', text: '' }), 3000);
+                              }
+                            }}
+                            className="p-2 text-orange-600 hover:text-orange-800 hover:bg-orange-100 rounded-lg transition-colors inline-flex items-center"
+                            title="Restaurer"
+                          >
+                            <span className="material-symbols-rounded text-2xl">unarchive</span>
+                          </button>
+                        ) : (
+                          <button
+                            onClick={async () => {
+                              if (!confirm('Voulez-vous archiver ce document ?')) return;
+                              try {
+                                await documentService.archiveDocument(doc.id || doc['@id']);
+                                // Recharger les documents pour mettre à jour le statut
+                                await loadPatientDocumentsAndAudios();
+                                setFlashMessage({ type: 'success', text: 'Document archivé avec succès.' });
+                                setTimeout(() => setFlashMessage({ type: '', text: '' }), 3000);
+                              } catch (e) {
+                                console.error('Erreur lors de l\'archivage:', e);
+                                setFlashMessage({ type: 'error', text: 'Erreur lors de l\'archivage du document.' });
+                                setTimeout(() => setFlashMessage({ type: '', text: '' }), 3000);
+                              }
+                            }}
+                            className="p-2 text-orange-600 hover:text-orange-800 hover:bg-orange-100 rounded-lg transition-colors inline-flex items-center"
+                            title="Archiver"
+                          >
+                            <span className="material-symbols-rounded text-2xl">archive</span>
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -1032,106 +1598,200 @@ const PatientSingle = () => {
           </div>
         </div>
 
-        {/* Notes médicales */}
-        {patient.notes && (
-          <div className="bg-orange-50 rounded-lg shadow-md p-6 mt-6">
-            <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
-              <span className="material-symbols-rounded text-red-600">note_alt</span>
-              Notes médicales
+        {/* Enregistrements audio du médecin */}
+        <div className="bg-orange-50 rounded-lg shadow-md p-6 mt-6">
+          <div className="flex items-center justify-between mb-4">
+            <h2 className="text-2xl font-bold text-gray-800 flex items-center gap-2">
+              <span className="material-symbols-rounded text-purple-600">mic</span>
+              Enregistrements audio du médecin
             </h2>
-            {(() => {
-              const n = patient?.notes ?? {};
-              if (typeof n === 'string') {
-                return (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                    <div className="bg-white rounded-lg shadow p-4">
-                      <h3 className="text-sm font-semibold text-gray-700 mb-2">Notes générales</h3>
-                      <p className="text-gray-700 whitespace-pre-wrap">{n}</p>
-                    </div>
-                  </div>
-                );
-              }
-
-              const sections = [
-                {
-                  label: 'Antécédents médicaux',
-                  value: n.antecedents || n.antecedantsMedicaux || ''
-                },
-                {
-                  label: 'Allergies',
-                  value: n.allergies || ''
-                },
-                {
-                  label: 'Traitements en cours',
-                  value: n.traitements || n.traitementEnCours || ''
-                },
-                {
-                  label: 'Autres informations',
-                  value: n.autres || n.autresInformations || ''
-                }
-              ];
-
-              return (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {sections.map(({ label, value }) => (
-                    <div key={label} className="bg-white rounded-lg shadow p-4">
-                      <h3 className="text-sm font-semibold text-gray-700 mb-2">{label}</h3>
-                      <p className="text-gray-700 whitespace-pre-wrap">{value ? value : '—'}</p>
-                    </div>
-                  ))}
-                </div>
-              );
-            })()}
+            <button
+              onClick={() => setShowAddAudio(true)}
+              className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-1 rounded-lg text-sm transition-colors inline-flex items-center gap-2 h-9"
+            >
+              <span className="material-symbols-rounded text-white text-lg">upload_file</span>
+              Ajouter
+            </button>
           </div>
-        )}
+          
+          <div className="overflow-auto pr-2 pb-6" style={{ maxHeight: 'calc(100vh - 320px)' }}>
+            {audiosError && (
+              <div className="mb-3 bg-red-100 border border-red-300 text-red-800 px-3 py-2 rounded text-sm">{audiosError}</div>
+            )}
+            {audiosLoading ? (
+              <div className="flex justify-center py-8">
+                <LoadingSpinner color="purple" size="medium" inline={true} />
+              </div>
+            ) : audios.length > 0 ? (
+              <div className="space-y-4">
+                {audios.map((audio) => {
+                  const title = audio.originalName || audio.original_name || audio.title || audio.name || 'Enregistrement sans nom';
+                  const fileName = audio.fileName || audio.file_name || audio.name || 'Fichier inconnu';
+                  const mimeType = audio.mimeType || audio.mime_type || 'Type inconnu';
+                  const fileSize = audio.size || 0;
+                  const uploadedBy = audio.uploadedBy;
+                  const uploadedByName = uploadedBy ? `${uploadedBy.prenom || uploadedBy.firstName || ''} ${uploadedBy.nom || uploadedBy.lastName || ''}`.trim() : "Utilisateur inconnu";
+                  const isArchived = audio.archivedAt;
+                  const isTranscription = (audio.type || '').toUpperCase() === 'TRANSCRIPTION_AUDIO' || 
+                                         /\.(txt|srt|vtt|docx|pdf|json|xml)$/i.test(fileName);
+
+                  return (
+                    <div key={audio.id || audio['@id']} className="bg-white p-4 rounded-lg border border-gray-200 hover:shadow-md transition-shadow">
+                      <div className="flex items-start justify-between">
+                        <div className="flex items-start space-x-3 flex-1">
+                          <div className="w-10 h-10 bg-purple-100 rounded-lg flex items-center justify-center flex-shrink-0">
+                            <span className="material-symbols-rounded text-purple-600">
+                              {isTranscription ? 'description' : 'mic'}
+                            </span>
+                          </div>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center space-x-2 mb-1">
+                              <h3 className="text-sm font-medium text-gray-900 truncate">{title}</h3>
+                              <span className={`inline-flex px-2 py-1 text-xs font-semibold rounded-full ${
+                                isArchived ? 'bg-red-100 text-red-800' : 'bg-purple-100 text-purple-800'
+                              }`}>
+                                {isArchived ? 'Archivé' : 'Actif'}
+                              </span>
+                            </div>
+                            <div className="text-xs text-gray-500 space-y-1">
+                              <div>{formatFileSize(fileSize)} • {mimeType}</div>
+                              <div>
+                                Ajouté le {formatDateTime(audio.uploadedAt || audio.uploaded_at)}
+                                {uploadedByName && ` par ${uploadedByName}`}
+                              </div>
+                            </div>
+                            {/* Lecteur audio ou aperçu transcription */}
+                            {isTranscription ? (
+                              <div className="mt-3 p-3 bg-gray-50 rounded-lg border border-gray-200">
+                                <p className="text-sm text-gray-600 mb-2">
+                                  <span className="material-symbols-rounded text-purple-600 align-middle mr-1 text-2xl">description</span>
+                                  Fichier de transcription
+                                </p>
+                                <button
+                                  onClick={() => openPreview(audio)}
+                                  className="text-sm text-purple-600 hover:text-purple-800 font-medium flex items-center gap-1"
+                                >
+                                  <span className="material-symbols-rounded text-2xl">visibility</span>
+                                  Voir la transcription
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="mt-3">
+                                {audioBlobUrls[audio.id || audio['@id']] ? (
+                                  <audio controls className="w-full max-w-md" preload="metadata">
+                                    <source src={audioBlobUrls[audio.id || audio['@id']]} type={mimeType} />
+                                    Votre navigateur ne supporte pas la lecture audio.
+                                  </audio>
+                                ) : (
+                                  <div className="text-sm text-gray-500">
+                                    Chargement de l'audio...
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex items-center space-x-2 ml-4">
+                          {!isTranscription && (
+                            <button
+                              onClick={() => {
+                                setSelectedAudioForTranscription(audio);
+                                setShowAddTranscription(true);
+                              }}
+                              className="px-3 py-1.5 text-sm bg-green-600 text-white hover:bg-green-700 rounded-lg transition-colors inline-flex items-center gap-1.5"
+                            >
+                              <span className="material-symbols-rounded text-lg">description</span>
+                              Ajouter telescription
+                            </button>
+                          )}
+                          <button
+                            onClick={async () => {
+                              try {
+                                const blob = await documentService.downloadDocument(audio.id);
+                                if (blob) {
+                                  const url = URL.createObjectURL(blob);
+                                  const a = document.createElement('a');
+                                  a.href = url;
+                                  a.download = title;
+                                  document.body.appendChild(a);
+                                  a.click();
+                                  a.remove();
+                                  setTimeout(() => URL.revokeObjectURL(url), 1000);
+                                }
+                              } catch (e) {
+                                console.error('Erreur lors du téléchargement:', e);
+                              }
+                            }}
+                            className="p-2 text-purple-600 hover:text-purple-800 hover:bg-purple-100 rounded-lg transition-colors inline-flex items-center"
+                            title="Télécharger"
+                          >
+                            <span className="material-symbols-rounded text-2xl">download</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="text-center py-8">
+                <div className="text-gray-400 text-4xl mb-2">
+                  <span className="material-symbols-rounded text-gray-400 text-4xl">mic</span>
+                </div>
+                <p className="text-gray-500">Aucun enregistrement audio</p>
+                <p className="text-sm text-gray-400 mt-1">Les enregistrements audio du médecin apparaîtront ici</p>
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* Hospitalisations */}
         <div className="bg-indigo-50 rounded-lg shadow-md p-6 mt-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold text-indigo-900 flex items-center gap-2">
+            <h2 className="text-2xl font-bold text-indigo-900 flex items-center gap-2">
               <span className="material-symbols-rounded text-indigo-600">local_hospital</span>
               Hospitalisations
             </h2>
             <button
               onClick={() => navigate(`/patients/${patient.id}/hospitalisations/nouveau`)}
-              className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 rounded text-sm transition-colors inline-flex items-center gap-1"
+              className="bg-indigo-600 hover:bg-indigo-700 text-white px-3 py-1 rounded-lg text-sm transition-colors inline-flex items-center gap-2 h-9"
             >
-              <span className="material-symbols-rounded text-white text-base">add</span>
+              <span className="material-symbols-rounded text-white text-lg">add</span>
               Nouvelle hospitalisation
             </button>
           </div>
           {hospisError && (
             <div className="mb-3 bg-red-100 border border-red-300 text-red-800 px-3 py-2 rounded text-sm">{hospisError}</div>
           )}
-          <div className="overflow-x-auto">
-            <table className="w-full">
+          <div className="w-full">
+            <table className="w-full table-auto">
               <thead className="bg-indigo-100">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-indigo-700 uppercase tracking-wider">Statut</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-indigo-700 uppercase tracking-wider">Service</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-indigo-700 uppercase tracking-wider">Dates</th>
-                  <th className="px-6 py-3 text-right text-xs font-medium text-indigo-700 uppercase tracking-wider">Actions</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-indigo-700 uppercase tracking-wider w-1/4">Statut</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-indigo-700 uppercase tracking-wider w-1/4">Service</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-indigo-700 uppercase tracking-wider w-2/4">Dates</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-indigo-700 uppercase tracking-wider w-auto">Actions</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {hospisLoading ? (
-                  <tr><td colSpan="4" className="px-6 py-6 text-center text-gray-500">Chargement…</td></tr>
+                  <tr><td colSpan="4" className="px-4 py-6 text-center text-gray-500">Chargement…</td></tr>
                 ) : hospis.length === 0 ? (
-                  <tr><td colSpan="4" className="px-6 py-6 text-center text-gray-500">Aucune hospitalisation</td></tr>
+                  <tr><td colSpan="4" className="px-4 py-6 text-center text-gray-500">Aucune hospitalisation</td></tr>
                 ) : (
                   hospis.map(h => (
                     <tr key={h.id} className="hover:bg-indigo-50/40">
-                      <td className="px-6 py-3 text-sm">
-                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800">
+                      <td className="px-4 py-3 text-sm">
+                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-800 whitespace-nowrap">
                           {h.statut}
                         </span>
                       </td>
-                      <td className="px-6 py-3 text-sm text-gray-700">{h.uniteService || '—'}</td>
-                      <td className="px-6 py-3 text-sm text-gray-700">
-                        {h.plannedAdmissionDate ? h.plannedAdmissionDate : '—'}
-                        {h.plannedDischargeDate ? ` → ${h.plannedDischargeDate}` : ''}
+                      <td className="px-4 py-3 text-sm text-gray-700 break-words">{h.uniteService || '—'}</td>
+                      <td className="px-4 py-3 text-sm text-gray-700 break-words">
+                        {h.plannedAdmissionDate ? formatDate(h.plannedAdmissionDate) : '—'}
+                        {h.plannedDischargeDate ? ` → ${formatDate(h.plannedDischargeDate)}` : ''}
                       </td>
-                      <td className="px-6 py-3 text-sm text-right">
+                      <td className="px-4 py-3 text-sm text-right whitespace-nowrap">
                         <button
                           onClick={() => navigate(`/patients/${patient.id}/hospitalisations/${h.id}`)}
                           className="text-indigo-600 hover:text-indigo-800 text-sm"
@@ -1147,10 +1807,11 @@ const PatientSingle = () => {
           </div>
         </div>
 
+
         {/* Historique des rendez-vous */}
         <div className="bg-pink-50 rounded-lg shadow-md p-6 mt-6">
           <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-bold text-pink-900 flex items-center gap-2">
+            <h2 className="text-2xl font-bold text-pink-900 flex items-center gap-2">
               <span className="material-symbols-rounded text-pink-600">event</span>
               Historique des rendez-vous
             </h2>
@@ -1160,7 +1821,7 @@ const PatientSingle = () => {
               disabled={isPatientDeceased}
               title={isPatientDeceased ? 'Agenda accessible uniquement en lecture pour ce patient.' : 'Voir agenda'}
             >
-              <span className={`material-symbols-rounded text-base ${isPatientDeceased ? 'text-gray-500' : 'text-white'}`}>calendar_month</span>
+              <span className={`material-symbols-rounded text-2xl ${isPatientDeceased ? 'text-gray-500' : 'text-white'}`}>calendar_month</span>
               Voir agenda
             </button>
           </div>
@@ -1172,20 +1833,21 @@ const PatientSingle = () => {
           {rdvsError && (
             <div className="mb-3 bg-red-100 border border-red-300 text-red-800 px-3 py-2 rounded text-sm">{rdvsError}</div>
           )}
-          <div className="overflow-x-auto">
-            <table className="w-full">
+          <div className="w-full">
+            <table className="w-full table-auto">
               <thead className="bg-pink-100">
                 <tr>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Date</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Statut</th>
-                  <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Motif</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider w-1/4">Date</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider w-1/5">Statut</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider w-1/4">Médecin</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider w-3/10">Motif</th>
                 </tr>
               </thead>
               <tbody className="bg-white divide-y divide-gray-200">
                 {rdvsLoading ? (
-                  <tr><td colSpan="3" className="px-6 py-6 text-center text-gray-500">Chargement…</td></tr>
+                  <tr><td colSpan="4" className="px-4 py-6 text-center text-gray-500">Chargement…</td></tr>
                 ) : rdvs.length === 0 ? (
-                  <tr><td colSpan="3" className="px-6 py-6 text-center text-gray-500">Aucun rendez-vous</td></tr>
+                  <tr><td colSpan="4" className="px-4 py-6 text-center text-gray-500">Aucun rendez-vous</td></tr>
                 ) : (() => {
                   // Pagination
                   const totalPages = Math.ceil(rdvs.length / RDV_PER_PAGE);
@@ -1198,17 +1860,24 @@ const PatientSingle = () => {
                       {paginatedRdvs.map(r => {
                         const statut = r.statut || '';
                         const badgeClasses = getStatusBadgeClasses(statut);
+                        const medecin = r.medecin || null;
+                        const medecinName = medecin 
+                          ? `${medecin.prenom || ''} ${medecin.nom || ''}`.trim() || 'N/A'
+                          : '—';
                         return (
                           <tr key={r.id} className="hover:bg-pink-50/40">
-                            <td className="px-6 py-3 text-sm text-gray-700">
+                            <td className="px-4 py-3 text-sm text-gray-700 break-words">
                               {r.startAt ? new Date(r.startAt).toLocaleString('fr-FR') : (r.start_at ? new Date(r.start_at).toLocaleString('fr-FR') : '—')}
                             </td>
-                            <td className="px-6 py-3 text-sm">
-                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${badgeClasses}`}>
+                            <td className="px-4 py-3 text-sm">
+                              <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${badgeClasses} whitespace-nowrap`}>
                                 {statut || '—'}
                               </span>
                             </td>
-                            <td className="px-6 py-3 text-sm text-gray-700">{r.motif || '—'}</td>
+                            <td className="px-4 py-3 text-sm text-gray-700 break-words">
+                              {medecinName}
+                            </td>
+                            <td className="px-4 py-3 text-sm text-gray-700 break-words">{r.motif || '—'}</td>
                           </tr>
                         );
                       })}
@@ -1240,7 +1909,7 @@ const PatientSingle = () => {
                         : "bg-white hover:bg-pink-50 border-pink-300 text-pink-700"
                     }`}
                   >
-                    <span className="material-symbols-rounded text-base">chevron_left</span>
+                    <span className="material-symbols-rounded text-2xl">chevron_left</span>
                   </button>
                   <div className="flex items-center gap-1">
                     {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
@@ -1279,7 +1948,7 @@ const PatientSingle = () => {
                         : "bg-white hover:bg-pink-50 border-pink-300 text-pink-700"
                     }`}
                   >
-                    <span className="material-symbols-rounded text-base">chevron_right</span>
+                    <span className="material-symbols-rounded text-2xl">chevron_right</span>
                   </button>
                 </div>
               </div>
@@ -1289,7 +1958,7 @@ const PatientSingle = () => {
 
         {/* Informations système */}
         <div className="bg-orange-50 rounded-lg shadow-md p-6 mt-6">
-          <h2 className="text-xl font-bold text-gray-800 mb-4 flex items-center gap-2">
+          <h2 className="text-2xl font-bold text-gray-800 mb-4 flex items-center gap-2">
             <span className="material-symbols-rounded text-gray-600">info</span>
             Informations système
           </h2>
@@ -1313,7 +1982,7 @@ const PatientSingle = () => {
             <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl mx-4">
               <div className="px-6 py-4 border-b flex items-center justify-between">
                 <div>
-                  <h3 className="text-lg font-semibold text-gray-800">{previewDoc.originalName || previewDoc.title || 'Document'}</h3>
+                  <h3 className="text-2xl font-semibold text-gray-800">{previewDoc.originalName || previewDoc.title || 'Document'}</h3>
                   <p className="text-xs text-gray-500">{previewDoc.type || previewDoc.mimeType || 'Type inconnu'}</p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -1351,15 +2020,81 @@ const PatientSingle = () => {
                 ) : (() => {
                   const url = previewUrl;
                   const mime = (previewMime || previewDoc.mimeType || previewDoc.type || '').toLowerCase();
-                  const isImage = mime.startsWith('image/') || /\.(png|jpe?g|gif|webp)$/i.test(url || '');
-                  const isPdf = mime === 'application/pdf' || /\.pdf$/i.test(url || '');
+                  const fileName = (previewDoc.originalName || previewDoc.fileName || '').toLowerCase();
+                  const isImage = mime.startsWith('image/') || /\.(png|jpe?g|gif|webp|bmp|tiff?)$/i.test(fileName);
+                  const isPdf = mime === 'application/pdf' || /\.pdf$/i.test(fileName);
+                  const isText = mime === 'text/plain' || mime.startsWith('text/') || /\.(txt|md|log|csv|json|xml|html|css|js|ts|tsx|jsx)$/i.test(fileName);
+                  const isAudio = mime.startsWith('audio/') || /\.(mp3|wav|ogg|m4a|flac|aac|webm)$/i.test(fileName);
+                  
                   if (url && isImage) {
                     return <img src={url} alt="aperçu" className="max-h-[60vh] w-auto mx-auto rounded border" />;
                   }
                   if (url && isPdf) {
                     return <iframe title="aperçu" src={url} className="w-full h-[65vh] border rounded" />;
                   }
-                  return <div className="text-center text-gray-600 text-sm">Aperçu non disponible. Utilisez Télécharger.</div>;
+                  if (isText && previewTextContent) {
+                    // Pour les fichiers texte, afficher le contenu chargé
+                    return (
+                      <div className="w-full">
+                        <pre className="bg-gray-50 p-4 rounded border border-gray-200 overflow-auto max-h-[60vh] text-sm font-mono whitespace-pre-wrap break-words">
+                          {previewTextContent}
+                        </pre>
+                      </div>
+                    );
+                  }
+                  if (isText && !previewTextContent) {
+                    return <div className="text-center text-gray-600 text-sm">Chargement du contenu texte…</div>;
+                  }
+                  if (url && isAudio) {
+                    return (
+                      <div className="flex flex-col items-center justify-center p-4">
+                        <audio controls className="w-full max-w-md">
+                          <source src={url} type={mime} />
+                          Votre navigateur ne supporte pas la lecture audio.
+                        </audio>
+                      </div>
+                    );
+                  }
+                  
+                  // Formats non visualisables
+                  const isOfficeDoc = /\.(doc|docx|xls|xlsx|ppt|pptx)$/i.test(fileName);
+                  const isArchive = /\.(zip|rar|7z|tar|gz)$/i.test(fileName);
+                  const isDicom = /\.(dcm|dicom)$/i.test(fileName);
+                  
+                  let message = 'Aperçu non disponible pour ce type de fichier.';
+                  let details = '';
+                  
+                  if (isOfficeDoc) {
+                    details = 'Les documents Office (Word, Excel, PowerPoint) doivent être téléchargés et ouverts avec l\'application correspondante.';
+                  } else if (isArchive) {
+                    details = 'Les archives (ZIP, RAR, etc.) doivent être téléchargées et extraites avec un logiciel d\'extraction.';
+                  } else if (isDicom) {
+                    details = 'Les fichiers DICOM nécessitent un logiciel spécialisé pour être visualisés.';
+                  } else {
+                    details = 'Ce format de fichier ne peut pas être prévisualisé dans le navigateur.';
+                  }
+                  
+                  return (
+                    <div className="text-center p-6">
+                      <div className="mb-4">
+                        <span className="material-symbols-rounded text-gray-400 text-5xl">description</span>
+                      </div>
+                      <p className="text-gray-700 font-medium mb-2">{message}</p>
+                      <p className="text-gray-600 text-sm mb-4">{details}</p>
+                      <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 text-left">
+                        <p className="text-blue-800 text-sm font-medium mb-2">Formats supportés en prévisualisation :</p>
+                        <ul className="text-blue-700 text-xs space-y-1 list-disc list-inside">
+                          <li>Images : PNG, JPG, GIF, WebP, BMP, TIFF</li>
+                          <li>Documents : PDF</li>
+                          <li>Texte : TXT, MD, LOG, CSV, JSON, XML, HTML, CSS, JS</li>
+                          <li>Audio : MP3, WAV, OGG, M4A, FLAC, AAC</li>
+                        </ul>
+                      </div>
+                      <p className="text-gray-500 text-xs mt-4">
+                        Utilisez le bouton <strong>Télécharger</strong> pour ouvrir ce fichier avec une application externe.
+                      </p>
+                    </div>
+                  );
                 })()}
               </div>
             </div>
@@ -1370,16 +2105,41 @@ const PatientSingle = () => {
           <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
             <div className="bg-white rounded-lg shadow-xl w-full max-w-xl mx-4">
               <div className="px-6 py-4 border-b flex items-center justify-between">
-                <h3 className="text-lg font-semibold text-gray-800">Ajouter un document</h3>
+                <h3 className="text-2xl font-semibold text-gray-800">Ajouter un document</h3>
                 <button onClick={closeAddDoc} className="p-2 rounded hover:bg-gray-100">
                   <span className="material-symbols-rounded">close</span>
                 </button>
               </div>
               <div className="p-6 space-y-4">
+                {/* Message d'erreur/succès dans le modal */}
+                {flashMessage.text && (
+                  <div className={`${flashMessage.type === 'success' ? 'bg-green-100 border-green-300 text-green-800' : 'bg-red-100 border-red-300 text-red-800'} border px-4 py-3 rounded flex items-center gap-2`}>
+                    <span className={`material-symbols-rounded ${flashMessage.type === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+                      {flashMessage.type === 'success' ? 'check_circle' : 'error'}
+                    </span>
+                    <span className="flex-1">{flashMessage.text}</span>
+                  </div>
+                )}
+                
                 <div className="border-2 border-dashed border-green-300 rounded-lg p-6 text-center">
-                  <input type="file" onChange={(e) => setNewDocFile(e.target.files?.[0] ?? null)} />
+                  <label className="cursor-pointer inline-block">
+                    <span className="material-symbols-rounded text-green-400 text-4xl mb-2 block">upload_file</span>
+                    <p className="text-sm text-green-700 mb-2">
+                      <span className="font-semibold">Cliquez pour sélectionner</span> ou glissez-déposez un fichier
+                    </p>
+                    <p className="text-xs text-green-600">PDF, DOC, DOCX, TXT, JPG, PNG</p>
+                    <input
+                      type="file"
+                      className="hidden"
+                      onChange={(e) => setNewDocFile(e.target.files?.[0] ?? null)}
+                      accept=".pdf,.doc,.docx,.txt,.jpg,.jpeg,.png"
+                    />
+                  </label>
                   {newDocFile && (
-                    <div className="mt-3 text-sm text-gray-700">{newDocFile.name}</div>
+                    <div className="mt-3 p-3 bg-green-100 rounded-lg border border-green-200">
+                      <p className="text-sm text-green-800 font-medium">Fichier sélectionné : {newDocFile.name}</p>
+                      <p className="text-xs text-green-600">Taille : {(newDocFile.size / 1024 / 1024).toFixed(2)} MB</p>
+                    </div>
                   )}
                 </div>
                 
@@ -1425,7 +2185,7 @@ const PatientSingle = () => {
                     <optgroup label="Justificatifs requis">
                       <option value="CARTE_IDENTITE">Carte d'identité</option>
                       <option value="CARTE_VITALE">Carte vitale</option>
-                      <option value="CONTACTS_URGENCE">Formulaire de contacts d'urgence</option>
+                      <option value="CONTACTS_URGENCE">Contact d'urgence</option>
                       <option value="CARTE_MUTUELLE">Carte mutuelle</option>
                     </optgroup>
                     <optgroup label="Documents de suivi">
@@ -1473,12 +2233,115 @@ const PatientSingle = () => {
             </div>
           </div>
         )}
+        {/* Modal ajout enregistrement audio */}
+        {showAddAudio && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-xl mx-4">
+              <div className="px-6 py-4 border-b flex items-center justify-between">
+                <h3 className="text-2xl font-semibold text-gray-800">Ajouter un enregistrement audio</h3>
+                <button onClick={closeAddAudio} className="p-2 rounded hover:bg-gray-100">
+                  <span className="material-symbols-rounded">close</span>
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="border-2 border-dashed border-purple-300 rounded-lg p-6 text-center">
+                  <label className="cursor-pointer inline-block">
+                    <span className="material-symbols-rounded text-purple-400 text-4xl mb-2 block">mic</span>
+                    <p className="text-sm text-purple-700 mb-2">
+                      <span className="font-semibold">Cliquez pour sélectionner</span> ou glissez-déposez un fichier
+                    </p>
+                    <p className="text-xs text-purple-600">Audio (MP3, WAV, M4A, OGG) ou Transcription (TXT, SRT, VTT, DOCX, PDF)</p>
+                    <input 
+                      type="file" 
+                      className="hidden"
+                      accept="audio/*,.mp3,.wav,.m4a,.ogg,.webm,.txt,.srt,.vtt,.docx,.pdf,.json,.xml"
+                      onChange={(e) => setNewAudioFile(e.target.files?.[0] ?? null)} 
+                    />
+                  </label>
+                  {newAudioFile && (
+                    <div className="mt-3 p-3 bg-purple-100 rounded-lg border border-purple-200">
+                      <p className="text-sm text-purple-800 font-medium">Fichier sélectionné : {newAudioFile.name}</p>
+                      <p className="text-xs text-purple-600">Taille : {(newAudioFile.size / 1024 / 1024).toFixed(2)} MB</p>
+                    </div>
+                  )}
+                  <p className="text-xs text-gray-500 mt-2">
+                    Formats acceptés : Audio (MP3, WAV, M4A, OGG, WEBM) ou Transcription (TXT, SRT, VTT, DOCX, PDF, JSON, XML)
+                  </p>
+                </div>
+              </div>
+              <div className="px-6 py-4 border-t flex items-center justify-end gap-2">
+                <button onClick={closeAddAudio} className="px-4 py-2 rounded border border-gray-300 text-gray-700 hover:bg-gray-50">Annuler</button>
+                <button
+                  onClick={submitAddAudio}
+                  disabled={!newAudioFile || uploadingAudio}
+                  className="px-4 py-2 rounded bg-purple-600 text-white hover:bg-purple-700 disabled:opacity-50"
+                >
+                  {uploadingAudio ? 'Envoi…' : 'Uploader'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+        {/* Modal ajout transcription */}
+        {showAddTranscription && selectedAudioForTranscription && (
+          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-xl mx-4">
+              <div className="px-6 py-4 border-b flex items-center justify-between">
+                <h3 className="text-2xl font-semibold text-gray-800">Ajouter une telescription</h3>
+                <button onClick={closeAddTranscription} className="p-2 rounded hover:bg-gray-100">
+                  <span className="material-symbols-rounded">close</span>
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="bg-purple-50 border border-purple-200 rounded-lg p-4">
+                  <p className="text-sm text-purple-800">
+                    <span className="font-semibold">Audio source :</span> {selectedAudioForTranscription.originalName || selectedAudioForTranscription.original_name || selectedAudioForTranscription.title || 'Fichier audio'}
+                  </p>
+                </div>
+                <div className="border-2 border-dashed border-green-300 rounded-lg p-6 text-center">
+                  <label className="cursor-pointer inline-block">
+                    <span className="material-symbols-rounded text-green-400 text-4xl mb-2 block">description</span>
+                    <p className="text-sm text-green-700 mb-2">
+                      <span className="font-semibold">Cliquez pour sélectionner</span> ou glissez-déposez un fichier de transcription
+                    </p>
+                    <p className="text-xs text-green-600">Transcription (TXT, SRT, VTT, DOCX, PDF, JSON, XML)</p>
+                    <input 
+                      type="file" 
+                      className="hidden"
+                      accept=".txt,.srt,.vtt,.docx,.pdf,.json,.xml"
+                      onChange={(e) => setNewTranscriptionFile(e.target.files?.[0] ?? null)} 
+                    />
+                  </label>
+                  {newTranscriptionFile && (
+                    <div className="mt-3 p-3 bg-green-100 rounded-lg border border-green-200">
+                      <p className="text-sm text-green-800 font-medium">Fichier sélectionné : {newTranscriptionFile.name}</p>
+                      <p className="text-xs text-green-600">Taille : {(newTranscriptionFile.size / 1024).toFixed(2)} KB</p>
+                    </div>
+                  )}
+                  <p className="text-xs text-gray-500 mt-2">
+                    Formats acceptés : TXT, SRT, VTT, DOCX, PDF, JSON, XML
+                  </p>
+                </div>
+              </div>
+              <div className="px-6 py-4 border-t flex items-center justify-end gap-2">
+                <button onClick={closeAddTranscription} className="px-4 py-2 rounded border border-gray-300 text-gray-700 hover:bg-gray-50">Annuler</button>
+                <button
+                  onClick={submitAddTranscription}
+                  disabled={!newTranscriptionFile || uploadingTranscription}
+                  className="px-4 py-2 rounded bg-green-600 text-white hover:bg-green-700 disabled:opacity-50"
+                >
+                  {uploadingTranscription ? 'Envoi…' : 'Uploader la transcription'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
         {/* Modal édition couverture */}
         {showEditCouverture && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
             <div className="bg-white rounded-lg shadow-xl w-full max-w-xl mx-4 border border-orange-200">
               <div className="px-6 py-4 border-b border-orange-200 bg-orange-50 flex items-center justify-between rounded-t-lg">
-                <h3 className="text-lg font-semibold text-orange-800">Modifier la couverture</h3>
+                <h3 className="text-2xl font-semibold text-orange-800">Modifier la couverture</h3>
                 <button onClick={closeEditCouverture} className="text-orange-400 hover:text-orange-600">
                   <span className="material-symbols-rounded">close</span>
                 </button>

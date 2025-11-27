@@ -15,6 +15,7 @@ export interface PatientIncomplet {
   id: string;
   nom: string;
   prenom: string;
+  genre?: string;
   email?: string;
   telephone?: string;
   dateNaissance?: string;
@@ -53,7 +54,7 @@ class JustificatifService {
       const response = await Axios.get('/me/dashboard');
       return response.data;
     } catch (error: any) {
-      console.error('❌ Erreur lors de la récupération du dashboard:', error);
+      console.error('Erreur lors de la récupération du dashboard:', error);
       // Retourner une structure vide en cas d'erreur
       return {
         notes: [],
@@ -72,7 +73,7 @@ class JustificatifService {
       const response = await Axios.get(`/justificatifs/patient/${patientId}`);
       return response.data;
     } catch (error: any) {
-      console.error(`❌ Erreur lors de la récupération du statut des justificatifs pour le patient ${patientId}:`, error);
+      console.error(`Erreur lors de la récupération du statut des justificatifs pour le patient ${patientId}:`, error);
       throw error;
     }
   }
@@ -90,12 +91,11 @@ class JustificatifService {
         total
       };
     } catch (error: any) {
-      console.error('❌ Erreur lors de la récupération des patients incomplets:', error);
+      console.error('Erreur lors de la récupération des patients incomplets:', error);
       return { data: [], total: 0 };
     }
   }
 }
 
 export default new JustificatifService();
-
 

@@ -94,10 +94,10 @@ const NotesList = ({ notes = [], onDelete, canDelete = false, loading = false })
               {canDelete && onDelete && (
                 <button
                   onClick={() => onDelete(note.id)}
-                  className="ml-4 text-red-600 hover:text-red-800 transition-colors"
+                  className="ml-4 text-red-600 hover:text-red-800 transition-colors flex items-center justify-center"
                   title="Supprimer la note"
                 >
-                  <span className="material-symbols-rounded text-xl">delete</span>
+                  <span className="material-symbols-rounded" style={{ fontSize: '2rem', width: '2rem', height: '2rem' }}>delete</span>
                 </button>
               )}
             </div>

@@ -5,6 +5,9 @@ export type UIPatientFilters = {
   ville?: string;
   page?: number;
   limit?: number;
+  // Filtres de date utilisés côté front (optionnels pour certains endpoints)
+  dateDebut?: string;
+  dateFin?: string;
 };
 
 export function buildPatientParams(f: UIPatientFilters): URLSearchParams {

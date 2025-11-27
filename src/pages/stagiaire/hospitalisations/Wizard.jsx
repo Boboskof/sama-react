@@ -5,6 +5,9 @@ import patientService from '../../../_services/patient.service';
 import documentService from '../../../_services/document.service';
 import { communicationService } from '../../../_services/communication.service';
 import userService from '../../../_services/user.service';
+import { formatDate as formatDateDisplay } from '../../../utils/dateHelpers';
+import PatientName from '../../../components/PatientName';
+import LoadingSpinner from '../../../components/LoadingSpinner';
 
 const Wizard = () => {
   const { id } = useParams();
@@ -81,6 +84,8 @@ const Wizard = () => {
         fd.append('patient', id);
         fd.append('type', 'AUTRE');
         fd.append('contenu', `Hospitalisation #${created.id}`);
+        // Note: Pas de champ titre dans ce formulaire, donc pas d'original_name envoyé
+        // Le backend utilisera le nom du fichier par défaut
         // Le backend devrait accepter un champ "tags" ou "hospitalisationId"
         await documentService.createDocument(fd);
       }
@@ -161,7 +166,7 @@ const Wizard = () => {
   const today = formatDate(new Date());
 
   return (
-    <div className="min-h-screen p-6 space-y-6 bg-indigo-50">
+    <div className="min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6 space-y-6 bg-indigo-50">
       <div className="text-center py-6">
         <div className="bg-indigo-200 rounded-lg shadow p-6 max-w-xl mx-auto">
           <h1 className="text-2xl font-bold text-indigo-800">Nouvelle hospitalisation</h1>
@@ -266,9 +271,16 @@ const Wizard = () => {
             <button
               disabled={loading || !canProceedStep1()}
               onClick={next}
-              className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
             >
-              {loading ? 'Création...' : 'Suivant'}
+              {loading ? (
+                <>
+                  <LoadingSpinner color="white" size="small" inline={true} />
+                  Création...
+                </>
+              ) : (
+                'Suivant'
+              )}
             </button>
           </div>
         </div>
@@ -360,13 +372,20 @@ const Wizard = () => {
           {created && (
             <div className="mb-4">
               <label className="block text-sm font-medium text-gray-700 mb-2">Upload de documents (tag: Hospitalisation #{created.id})</label>
-              <input
-                type="file"
-                multiple
-                onChange={handleFileUpload}
-                disabled={loading}
-                className="w-full border rounded px-3 py-2"
-              />
+              <label className="cursor-pointer block border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-blue-400 transition-colors">
+                <span className="material-symbols-rounded text-gray-400 text-4xl mb-2 block">upload_file</span>
+                <p className="text-sm text-gray-700 mb-2">
+                  <span className="font-semibold">Cliquez pour sélectionner</span> ou glissez-déposez des fichiers
+                </p>
+                <p className="text-xs text-gray-500">Vous pouvez sélectionner plusieurs fichiers</p>
+                <input
+                  type="file"
+                  multiple
+                  onChange={handleFileUpload}
+                  disabled={loading}
+                  className="hidden"
+                />
+              </label>
               {uploadedFiles.length > 0 && (
                 <ul className="mt-2 text-sm text-gray-600">
                   {uploadedFiles.map((f, i) => (
@@ -387,9 +406,16 @@ const Wizard = () => {
             <button
               disabled={loading || !plannedAdmissionDate}
               onClick={next}
-              className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+              className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 disabled:opacity-50 flex items-center gap-2"
             >
-              {loading ? 'Planification...' : 'Suivant'}
+              {loading ? (
+                <>
+                  <LoadingSpinner color="white" size="small" inline={true} />
+                  Planification...
+                </>
+              ) : (
+                'Suivant'
+              )}
             </button>
           </div>
         </div>
@@ -404,11 +430,11 @@ const Wizard = () => {
             <div>
               <h4 className="font-medium text-gray-700 mb-2">Récapitulatif</h4>
               <div className="bg-gray-50 p-4 rounded space-y-2 text-sm">
-                <p><strong>Patient:</strong> {patient ? `${patient.prenom} ${patient.nom}` : id}</p>
+                <p><strong>Patient:</strong> {patient ? <PatientName patient={patient} /> : id}</p>
                 <p><strong>Service:</strong> {uniteService}</p>
                 <p><strong>Motif:</strong> {motifAdministratif}</p>
-                <p><strong>Admission prévue:</strong> {plannedAdmissionDate || '—'}</p>
-                {plannedDischargeDate && <p><strong>Sortie prévue:</strong> {plannedDischargeDate}</p>}
+                <p><strong>Admission prévue:</strong> {plannedAdmissionDate ? formatDateDisplay(plannedAdmissionDate) : '—'}</p>
+                {plannedDischargeDate && <p><strong>Sortie prévue:</strong> {formatDateDisplay(plannedDischargeDate)}</p>}
                 {createRdvPreAdmission && <p><strong>RDV pré-admission:</strong> {rdvStartAt ? new Date(rdvStartAt).toLocaleString('fr-FR') : 'Créé automatiquement'}</p>}
                 <p><strong>Checklist:</strong> {checklistProgress()}%</p>
               </div>

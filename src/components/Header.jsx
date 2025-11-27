@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
 import userService from '../_services/user.service';
-import SearchBar from './SearchBar';
 
 const Header = () => {
   const [user, setUser] = useState(null);
@@ -14,12 +13,18 @@ const Header = () => {
       setIsLoggedIn(isLogged);
       
       if (isLogged) {
-        try {
-          // Récupérer les données utilisateur depuis le serveur
-          const userData = await userService.getCurrentUser();
-          setUser(userData);
-        } catch (error) {
-          setUser(null);
+        // D'abord vérifier si l'utilisateur est déjà dans localStorage
+        const storedUser = userService.getUser();
+        if (storedUser) {
+          setUser(storedUser);
+        } else {
+          try {
+            // Sinon récupérer les données utilisateur depuis le serveur
+            const userData = await userService.getCurrentUser();
+            setUser(userData);
+          } catch (error) {
+            setUser(null);
+          }
         }
       } else {
         setUser(null);
@@ -27,6 +32,25 @@ const Header = () => {
     };
 
     checkAuth();
+
+    // Écouter les changements d'authentification
+    const handleAuthChange = () => {
+      checkAuth();
+    };
+
+    const handleStorageChange = (e) => {
+      if (e.key === 'user' || e.key === 'token') {
+        checkAuth();
+      }
+    };
+
+    window.addEventListener('authChange', handleAuthChange);
+    window.addEventListener('storage', handleStorageChange);
+
+    return () => {
+      window.removeEventListener('authChange', handleAuthChange);
+      window.removeEventListener('storage', handleStorageChange);
+    };
   }, []);
 
   // Fermer le menu déroulant quand on clique à l'extérieur
@@ -46,8 +70,8 @@ const Header = () => {
     };
   }, [isDropdownOpen]);
 
-  const handleLogout = () => {
-    userService.logout();
+  const handleLogout = async () => {
+    await userService.logout();
     setIsLoggedIn(false);
     setUser(null);
     setIsDropdownOpen(false);

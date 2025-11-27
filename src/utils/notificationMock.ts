@@ -2,18 +2,15 @@ type NotifMode = 'mock' | 'noop' | 'api';
 
 export function getNotificationMode(): NotifMode {
   const raw = (import.meta as any)?.env?.VITE_NOTIF_MODE as string | undefined;
-  console.log("🔍 VITE_NOTIF_MODE raw value:", raw);
-  console.log("🔍 import.meta.env:", import.meta.env);
   
-  // Force le mode API pour les vrais appels
+  // Si une variable d'environnement est définie, l'utiliser
   if (raw === 'mock' || raw === 'noop' || raw === 'api') {
-    console.log("✅ Mode détecté depuis .env:", raw);
     return raw;
   }
   
-  // Force mock temporairement pour voir les emails dans MailHog
-  console.log("🔧 Mode forcé à 'mock' pour les tests MailHog");
-  return 'mock';
+  // Par défaut, utiliser l'API réelle en production
+  // En développement, on peut utiliser 'mock' pour tester sans envoyer de vrais emails
+  return import.meta.env.PROD ? 'api' : 'api';
 }
 
 export type SimulatedResult = {

@@ -60,7 +60,6 @@ async function getMutuelleIriByName(name: string): Promise<string> {
     }
     return item['@id'];
   } catch (error) {
-    console.error(`❌ Erreur lors de la recherche de la mutuelle "${name}":`, error);
     throw error;
   }
 }
@@ -86,21 +85,93 @@ function normalizePhone(phone: string): string {
   return cleaned;
 }
 
-// Utilitaire pour dérouler les réponses patients (support tous formats)
-function unwrapPatients(d: any): Patient[] {
-  if (Array.isArray(d?.data)) return d.data;
-  if (Array.isArray(d?.['hydra:member'])) return d['hydra:member'];
-  if (Array.isArray(d?.member)) return d.member;
-  if (Array.isArray(d)) return d;
-  return [];
+// Fonction de normalisation pour garantir que tous les champs sont présents
+function normalizePatientData(patient: any): Patient {
+  if (!patient || typeof patient !== 'object') {
+    return patient as Patient;
+  }
+  
+  // Normaliser tous les champs possibles (supporte plusieurs formats d'API)
+  return {
+    ...patient,
+    // Identité
+    id: patient.id || patient['@id']?.split('/').pop() || patient.uuid,
+    nom: patient.nom || patient.lastName || patient.name?.split(' ').pop() || '',
+    prenom: patient.prenom || patient.firstName || patient.name?.split(' ')[0] || '',
+    genre: patient.genre || patient.gender || patient.civilite || patient.sexe || 'Mr',
+    dateNaissance: patient.dateNaissance || patient.date_naissance || patient.dateOfBirth || patient.birthDate || null,
+    
+    // Contact
+    email: patient.email || patient.mail || null,
+    telephone: patient.telephone || patient.phone || patient.tel || null,
+    contactUrgenceNom: patient.contactUrgenceNom || patient.contact_urgence_nom || patient.emergencyContactName || patient.emergencyContact?.nom || null,
+    contactUrgenceTelephone: patient.contactUrgenceTelephone || patient.contact_urgence_telephone || patient.emergencyContactPhone || patient.emergencyContact?.telephone || null,
+    
+    // Adresse
+    adresseL1: patient.adresseL1 || patient.adresse_l1 || patient.addressL1 || patient.address?.l1 || patient.adresse || null,
+    adresseL2: patient.adresseL2 || patient.adresse_l2 || patient.addressL2 || patient.address?.l2 || null,
+    codePostal: patient.codePostal || patient.code_postal || patient.postalCode || patient.address?.codePostal || null,
+    ville: patient.ville || patient.city || patient.address?.ville || null,
+    
+    // Sécurité sociale
+    numeroSecu: patient.numeroSecu || patient.numero_secu || patient.numeroSecuriteSociale || patient.nir || patient.ssn || null,
+    organismeSecu: patient.organismeSecu || patient.organisme_secu || patient.organismeSecuriteSociale || patient.caisse || null,
+    
+    // Statut et métadonnées
+    statut: patient.statut || patient.status || patient.etat || 'ACTIF',
+    statutLabel: patient.statutLabel || patient.statut_label || patient.statusLabel || patient.status_label || '',
+    createdAt: patient.createdAt || patient.created_at || patient.dateCreation || null,
+    updatedAt: patient.updatedAt || patient.updated_at || patient.dateModification || null,
+    notes: patient.notes || patient.observations || null,
+    
+    // Relations (normaliser les formats IRI)
+    createdBy: patient.createdBy || patient.created_by || patient.owner || patient.utilisateur || null,
+    couvertures: patient.couvertures || patient.mutuelles || [],
+    
+    // Préserver les autres champs
+    ...Object.fromEntries(
+      Object.entries(patient).filter(([key]) => 
+        !['nom', 'prenom', 'genre', 'dateNaissance', 'email', 'telephone', 
+          'contactUrgenceNom', 'contactUrgenceTelephone', 'adresseL1', 'adresseL2', 
+          'codePostal', 'ville', 'numeroSecu', 'organismeSecu', 'statut', 
+          'statutLabel', 'createdAt', 'updatedAt', 'notes', 'createdBy', 'couvertures',
+          'lastName', 'firstName', 'gender', 'date_naissance', 'phone', 'tel',
+          'contact_urgence_nom', 'contact_urgence_telephone', 'adresse_l1', 'adresse_l2',
+          'code_postal', 'numero_secu', 'organisme_secu', 'created_at', 'updated_at',
+          'created_by', 'dateOfBirth', 'birthDate', 'emergencyContactName', 
+          'emergencyContactPhone', 'addressL1', 'addressL2', 'postalCode', 'city',
+          'numeroSecuriteSociale', 'nir', 'ssn', 'organismeSecuriteSociale', 'caisse',
+          'status', 'etat', 'statut_label', 'statusLabel', 'dateCreation', 'dateModification',
+          'owner', 'utilisateur', 'mutuelles', 'address', 'emergencyContact'].includes(key)
+      )
+    )
+  } as Patient;
 }
+
+// Utilitaire pour dérouler les réponses patients (support tous formats)
 
 
 const patientService = {
   // ----- Collection & Item (REST) -----
   /** ex: filters = { search: "john", dateDebut: "2024-01-01" } */
-  getAllPatients(filters: UIPatientFilters = {}, onlyMine = false): Promise<Patient[]> {
+  getAllPatients(filters: UIPatientFilters = {}, onlyMine = false, userId?: string | number): Promise<Patient[]> {
     const params = buildPatientParams(filters);
+    
+    // Si userId est fourni (pour formateurs/admins qui consultent les patients d'un stagiaire)
+    // Utiliser l'endpoint personnalisé /patients-all qui supporte le filtrage par userId
+    if (userId) {
+      params.append('userId', String(userId));
+      // Utiliser l'endpoint personnalisé /patients-all qui supporte le filtrage par userId
+      return Axios.get(`/patients-all?${params.toString()}`)
+        .then(response => {
+          // L'endpoint /patients-all retourne { data: [...], pagination: {...} }
+          const all = response.data?.data || response.data?.member || response.data?.['hydra:member'] || [];
+          return Array.isArray(all) ? all : [];
+        })
+        .catch(() => {
+          return [];
+        });
+    }
     
     // Si onlyMine, essayer d'ajouter un filtre backend
     if (onlyMine) {
@@ -150,29 +221,65 @@ const patientService = {
         }
         return filteredPatients;
       })
-      .catch(error => {
-        console.error('❌ Erreur lors de la récupération des patients:', error);
+      .catch(() => {
         return [];
       });
   },
 
-  // ----- Formateur: patients créés par des stagiaires -----
-  async getFormateurPatients(page: number = 1, perPage: number = 25): Promise<Patient[]> {
+  // ----- Stagiaire: patients de l'utilisateur connecté (via /patients-all) -----
+  /**
+   * Liste des patients pour un stagiaire connecté.
+   * Encapsule l'appel à /patients-all et normalise la réponse.
+   * Utilisée pour éviter tout appel direct à Axios dans les pages.
+   */
+  async getStagiairePatients(page: number = 1, perPage: number = 20, extra: Record<string, any> = {}): Promise<any[]> {
     try {
-      const res = await Axios.get('/formateur/patients', { params: { page, per_page: perPage } });
-      return unwrapPatients(res.data);
+      const params = new URLSearchParams();
+      params.append('page', String(page));
+      params.append('limit', String(perPage));
+      if (extra.search) params.append('search', extra.search);
+      if (extra.date_from) params.append('date_from', extra.date_from);
+      if (extra.date_to) params.append('date_to', extra.date_to);
+
+      const response = await Axios.get(`/patients-all?${params.toString()}`);
+      const list = response.data?.data || response.data?.member || response.data?.['hydra:member'] || [];
+      return Array.isArray(list) ? list : [];
     } catch (error) {
-      console.error('❌ Erreur récupération patients formateur:', error);
+      console.error('Error in getStagiairePatients:', error);
+      return [];
+    }
+  },
+
+  // ----- Formateur: patients créés par des stagiaires -----
+  async getFormateurPatients(page: number = 1, perPage: number = 25, extra: Record<string, any> = {}): Promise<Patient[]> {
+    try {
+      const params: Record<string, any> = { page, per_page: perPage, ...extra };
+      const res = await Axios.get('/formateur/patients', { params });
+      const data = unwrapList(res.data);
+      
+      // Normaliser les données pour garantir la compatibilité
+      return data.map((patient: any) => ({
+        ...patient,
+        // Normaliser dateNaissance (supporte plusieurs formats)
+        dateNaissance: patient.dateNaissance || patient.date_naissance || patient.dateOfBirth,
+        // Normaliser statut (supporte plusieurs formats)
+        statut: patient.statut || patient.status || patient.etat,
+        statutLabel: patient.statutLabel || patient.statut_label || patient.statusLabel,
+        // Normaliser createdAt (supporte plusieurs formats)
+        createdAt: patient.createdAt || patient.created_at || patient.createdAt,
+      }));
+    } catch (error) {
+      console.error('Error in getFormateurPatients:', error);
       return [];
     }
   },
 
   async getOnePatient(id: string | number): Promise<Patient> {
-    // Essai principal: item standard API Platform
+    // Essai principal: item standard API Platform (retourne patient:read avec tous les champs)
     try {
       const r = await Axios.get(`/patients/${enc(id)}`, { validateStatus: () => true });
       if (r.status && r.status < 300 && r.data) {
-        return r.data as Patient;
+        return normalizePatientData(r.data);
       }
       // Si 404 NotExposedAction ou route non exposée, fallback
       if (r.status === 404) {
@@ -182,13 +289,13 @@ const patientService = {
           // Supporte plusieurs enveloppes possibles
           const fromData = d?.patient ?? d?.data ?? d;
           if (fromData && typeof fromData === 'object' && !Array.isArray(fromData)) {
-            return fromData as Patient;
+            return normalizePatientData(fromData);
           }
         }
       }
       throw new Error(`Patient ${id} introuvable (status ${r.status})`);
     } catch (e) {
-      // Fallbacks via collection API
+      // Fallbacks via collection API (moins complet, mais mieux que rien)
       try {
         // 1) Essayer filtres possibles: id, id[], search
         const tryOnce = async (params: Record<string, any>) => {
@@ -198,18 +305,18 @@ const patientService = {
             const arr = (d?.['hydra:member'] ?? d?.member ?? d?.data ?? (Array.isArray(d) ? d : [])) as any[];
             if (Array.isArray(arr)) {
               const match = arr.find((p: any) => String(p?.id) === String(id) || String(p?.['@id'] || '').endsWith(`/${id}`));
-              if (match) return match as Patient;
+              if (match) return normalizePatientData(match);
             }
           }
           return null;
         };
 
         const direct = await tryOnce({ id: id, itemsPerPage: 1 });
-        if (direct) return direct as Patient;
+        if (direct) return direct;
         const directArr = await tryOnce({ 'id[]': id, itemsPerPage: 1 });
-        if (directArr) return directArr as Patient;
+        if (directArr) return directArr;
         const bySearch = await tryOnce({ search: id, itemsPerPage: 30 });
-        if (bySearch) return bySearch as Patient;
+        if (bySearch) return bySearch;
 
         // 2) Parcourir quelques pages si nécessaire (borné)
         const count = await this.countAllPatients();
@@ -218,7 +325,7 @@ const patientService = {
         for (let page = 1; page <= maxPages; page++) {
           const list = await this.getPatientsPage(page, perPage);
           const found = Array.isArray(list) ? list.find((p: any) => String(p?.id) === String(id) || String(p?.['@id'] || '').endsWith(`/${id}`)) : undefined;
-          if (found) return found as Patient;
+          if (found) return normalizePatientData(found);
         }
       } catch {}
       throw e;
@@ -235,7 +342,6 @@ const patientService = {
       }
       return patient;
     } catch (error) {
-      console.error('Erreur récupération patient depuis liste:', error);
       throw error;
     }
   },
@@ -279,7 +385,6 @@ const patientService = {
           );
         }
       }
-      console.error('❌ Erreur création couverture:', error);
       throw error;
     }
   },
@@ -384,16 +489,7 @@ const patientService = {
         if (!isPatientValid) {
           // Log seulement une fois par couverture invalide pour éviter les boucles
           if (!couverture._loggedError) {
-            // Désactiver les logs d'erreur en mode production si le filtrage fonctionne
-            if (import.meta.env.DEV) {
-              console.error('❌ ERREUR: Couverture d\'un autre patient trouvée!', {
-                expectedPatient: patientId,
-                foundPatient: patientRef,
-                couvertureId: couverture.id,
-                couverture: couverture
-              });
-            }
-            couverture._loggedError = true; // Marquer comme loggé
+            couverture._loggedError = true;
           }
         }
         
@@ -412,7 +508,6 @@ const patientService = {
       
       return validCouvertures;
     } catch (error) {
-      console.error('❌ Erreur récupération couvertures:', error);
       return [];
     }
   },
@@ -424,7 +519,7 @@ const patientService = {
     const me = JSON.parse(localStorage.getItem('user') || '{}');
     const userIri = me['@id'] || `/api/users/${me.id}`; // support IRI ou id
     const res = await Axios.get('/patients', { params: { createdBy: userIri, itemsPerPage: 100 } });
-    return unwrapPatients(res.data);
+    return unwrapList(res.data);
   },
 
   async createPatient(form: NewPatient): Promise<Patient> {
@@ -624,12 +719,27 @@ const patientService = {
   },
 
   /** Alertes couvertures: manquantes et expirées (auto-filtre par stagiaire côté back) */
-  async getCoverageAlerts(): Promise<{ manquantes: any[]; expirees: any[] }>{
+  async getCoverageAlerts(): Promise<{ manquantes: any[]; expirees: any[]; couvertures?: any[] }>{
     const res = await Axios.get('/status/couvertures/alerts');
     const d = (res.data?.data ?? res.data) as any;
     return {
       manquantes: Array.isArray(d?.manquantes) ? d.manquantes : [],
       expirees: Array.isArray(d?.expirees) ? d.expirees : [],
+      couvertures: Array.isArray(d?.couvertures) ? d.couvertures : undefined,
+    };
+  },
+
+  /** Toutes les couvertures avec leurs statuts (pour la liste des patients) */
+  async getAllCoverages(): Promise<{ couvertures: any[]; total: number; valides: number; expirees: number; futures: number; manquantes: number }>{
+    const res = await Axios.get('/status/couvertures');
+    const d = (res.data?.data ?? res.data) as any;
+    return {
+      couvertures: Array.isArray(d?.couvertures) ? d.couvertures : [],
+      total: Number(d?.total ?? 0),
+      valides: Number(d?.valides ?? 0),
+      expirees: Number(d?.expirees ?? 0),
+      futures: Number(d?.futures ?? 0),
+      manquantes: Number(d?.manquantes ?? 0),
     };
   },
 
@@ -699,8 +809,7 @@ const patientService = {
         }
         return [];
       })
-      .catch(error => {
-        console.error('❌ Erreur lors de la récupération des mutuelles:', error);
+      .catch(() => {
         // Fallback avec liste statique
         return [
           'Mutuelle Générale',

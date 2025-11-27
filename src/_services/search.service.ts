@@ -232,7 +232,7 @@ class SearchService {
     byCanal?: { [canal: string]: number };
   }> {
     try {
-      const params = {};
+      const params: Record<string, string> = {};
       if (filters.date_from) params.date_from = filters.date_from;
       if (filters.date_to) params.date_to = filters.date_to;
       

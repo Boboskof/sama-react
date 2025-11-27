@@ -7,7 +7,6 @@ export const useCommunications = (filters: UICommFilters = {}) => {
   return useQuery({
     queryKey: ['communications', filters],
     queryFn: () => communicationService.getCommunications(filters),
-    keepPreviousData: true, // Garde les données précédentes pendant le chargement
     staleTime: 5 * 60 * 1000, // 5 minutes
   });
 };

@@ -54,7 +54,7 @@ const MonProfil = () => {
 
   if (loading) {
     return (
-      <div className="min-h-screen p-6 flex items-center justify-center">
+      <div className="min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6 flex items-center justify-center">
         <div className="text-gray-600">Chargement…</div>
       </div>
     );
@@ -62,14 +62,14 @@ const MonProfil = () => {
 
   if (error) {
     return (
-      <div className="min-h-screen p-6 flex items-center justify-center">
+      <div className="min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6 flex items-center justify-center">
         <div className="bg-red-100 text-red-800 px-4 py-3 rounded">{error}</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen p-6 bg-orange-100">
+    <div className="min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6 bg-orange-100">
       <div className="max-w-3xl mx-auto space-y-6">
         <div className="bg-white rounded-lg shadow p-6">
           <h1 className="text-2xl font-bold text-orange-800 mb-4">Mon profil</h1>
@@ -128,5 +128,4 @@ const MonProfil = () => {
 };
 
 export default MonProfil;
-
 

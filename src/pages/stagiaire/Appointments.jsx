@@ -1,45 +1,27 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useMemo } from "react";
 import userService from "../../_services/user.service";
 import appointmentService from "../../_services/appointment.service";
 import patientService from "../../_services/patient.service";
 import medecinService from "../../_services/medecin.service";
 import ErrorMessage from "../../components/ErrorMessage";
-// Recherche/filters retirés
+import LoadingSpinner from "../../components/LoadingSpinner";
+import {
+  extractHHmm,
+  sameDay,
+  dayIndexMondayFirst,
+  getAppointmentDuration,
+  formatAppointmentTimeRange,
+  getDoctorNameFromAppointment,
+  getPatientId,
+  getAppointmentStatusClasses,
+  getAppointmentStatusLabel
+} from "../../utils/appointmentHelpers";
 
-const PATIENT_STATUS_META = {
-  ACTIF: { label: 'Actif', icon: '✅', isDeceased: false },
-  INACTIF: { label: 'Inactif', icon: '⏸️', isDeceased: false },
-  DECEDE: { label: 'Décédé', icon: '⚰️', isDeceased: true }
-};
+import { getPatientStatusInfo, getPatientNameString } from "../../utils/patientHelpers";
+import PatientName from "../../components/PatientName";
+import PatientSearchInput from "../../components/PatientSearchInput";
+import StatCard from "../../components/StatCard";
 
-const getPatientStatusInfo = (patientLike) => {
-  if (!patientLike) {
-    return { code: '', label: '', icon: '', isDeceased: false };
-  }
-  if (typeof patientLike === 'string') {
-    return { code: '', label: '', icon: '', isDeceased: false };
-  }
-  const rawStatus = patientLike.statut || patientLike.status || '';
-  const code = typeof rawStatus === 'string' ? rawStatus.toUpperCase() : '';
-  const meta = PATIENT_STATUS_META[code] || null;
-  const label = patientLike.statutLabel || patientLike.statusLabel || meta?.label || (typeof rawStatus === 'string' ? rawStatus : '');
-  return {
-    code,
-    label,
-    icon: meta?.icon || '',
-    isDeceased: meta?.isDeceased || false
-  };
-};
-
-const getPatientId = (patientLike) => {
-  if (!patientLike || typeof patientLike !== 'object') return undefined;
-  if (patientLike.id !== undefined && patientLike.id !== null) return String(patientLike.id);
-  if (typeof patientLike['@id'] === 'string') {
-    const iri = patientLike['@id'];
-    return iri.includes('/') ? iri.split('/').pop() : iri;
-  }
-  return undefined;
-};
 
 // Exemple d'Appointments simplifié avec mappers
 const Appointments = () => {
@@ -48,10 +30,22 @@ const Appointments = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  // Fonction utilitaire pour formater le genre
+  const formatGenre = (patient) => {
+    if (!patient) return null;
+    const raw = patient?.genre || patient?.gender || patient?.civilite || '';
+    const val = String(raw).trim();
+    if (!val) return null;
+    const lower = val.toLowerCase();
+    if (val === 'Mr' || val === 'M' || lower === 'homme' || lower === 'm.') return 'Mr';
+    if (val === 'Mme' || val === 'F' || lower === 'femme' || lower === 'mme.' || lower === 'madame') return 'Mme';
+    return val;
+  };
+
   // Référentiels
   const [patients, setPatients] = useState([]);
   const [medecins, setMedecins] = useState([]);
-  const medecinsById = React.useMemo(() => {
+  const medecinsById = useMemo(() => {
     const map = {};
     (medecins || []).forEach(m => { if (m && m.id) map[m.id] = m; });
     return map;
@@ -117,42 +111,87 @@ const SLOT_MINUTES = 30;
     return `${year}-${month}-${day}`;
   };
 
-  // Parse heures/minutes depuis formats back: "YYYY-MM-DD HH:mm:ss" ou ISO
-  const extractHHmm = (dateLike) => {
-    if (!dateLike) return '';
-    if (typeof dateLike === 'string') {
-      const s = dateLike;
-      // 1) "YYYY-MM-DD HH:mm:ss"
-      let m = s.match(/^(\d{4})-(\d{2})-(\d{2})\s(\d{2}):(\d{2})(?::\d{2})?$/);
-      if (m) return `${m[4]}:${m[5]}`;
-      // 2) ISO: "YYYY-MM-DDTHH:mm:ss"(+tz)
-      m = s.match(/T(\d{2}):(\d{2})(?::\d{2})?/);
-      if (m) return `${m[1]}:${m[2]}`;
-    }
-    const d = new Date(dateLike);
-    if (!isNaN(d)) {
-      const hh = String(d.getHours()).padStart(2, '0');
-      const mm = String(d.getMinutes()).padStart(2, '0');
-      return `${hh}:${mm}`;
-    }
-    return '';
+  const formatEndTimeFrom = (startTime, durationMinutes) => {
+    const [hours, minutes] = startTime.split(':').map(Number);
+    const totalMinutes = hours * 60 + minutes + durationMinutes;
+    const endHours = Math.floor(totalMinutes / 60);
+    const endMinutes = totalMinutes % 60;
+    return `${String(endHours).padStart(2, '0')}:${String(endMinutes).padStart(2, '0')}`;
   };
 
-  const sameDay = (a, b) => (
-    a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
-  );
+  // Helper pour détecter si un rendez-vous a l'urgence médecin (stocké dans les notes)
+  const hasUrgenceMedecin = (appt) => {
+    if (!appt) return false;
+    // Vérifier d'abord les champs directs (si le backend les supporte un jour)
+    if (appt.urgenceMedecin || appt.urgence_medecin) return true;
+    // Sinon vérifier dans les notes
+    const notes = appt.notes || '';
+    return notes.includes('[URGENCE_MEDECIN]');
+  };
 
-  const dayIndexMondayFirst = (date) => (date.getDay() + 6) % 7;
 
   const [selectedDate, setSelectedDate] = useState(() => new Date());
   const [currentMonth, setCurrentMonth] = useState(() => new Date());
 
   // Formateur
   const isFormateur = userService.isFormateur && userService.isFormateur();
+  const isAdmin = userService.isAdmin && userService.isAdmin();
+  const currentUser = userService.getUser && userService.getUser();
+  const currentUserId = currentUser?.id;
+  const currentUserIri = currentUser?.['@id'] || (currentUserId ? `/api/users/${currentUserId}` : null);
+  
+  // Fonction pour vérifier si l'utilisateur peut supprimer un rendez-vous
+  const canDeleteAppointment = (rdv) => {
+    // Formateurs et admins peuvent tout supprimer
+    if (isFormateur || isAdmin) return true;
+    
+    // Stagiaires peuvent supprimer uniquement leurs propres créations
+    if (!currentUserId || !currentUserIri) return false;
+    
+    const creator = rdv.createdBy || rdv.created_by || rdv.creePar || rdv.user || null;
+    if (!creator) return false;
+    
+    // Si creator est un objet
+    if (typeof creator === 'object') {
+      const creatorId = creator.id;
+      const creatorIri = creator['@id'] || (creatorId ? `/api/users/${creatorId}` : null);
+      return String(creatorId) === String(currentUserId) || creatorIri === currentUserIri;
+    }
+    
+    // Si creator est une string (IRI)
+    if (typeof creator === 'string') {
+      const creatorId = creator.includes('/') ? creator.split('/').pop() : creator;
+      return String(creatorId) === String(currentUserId) || creator === currentUserIri;
+    }
+    
+    // Si creator est un nombre (ID)
+    if (typeof creator === 'number') {
+      return String(creator) === String(currentUserId);
+    }
+    
+    return false;
+  };
+  
   const [trainerAppointments, setTrainerAppointments] = useState([]);
   const [trainerLoading, setTrainerLoading] = useState(false);
   const [creatorMap, setCreatorMap] = useState({}); // id -> { prenom, nom, email }
   const [creatorLabelByRdv, setCreatorLabelByRdv] = useState({}); // rdvId -> string label
+  const [trainerFilter, setTrainerFilter] = useState('a_venir'); // 'a_venir', 'passes'
+  const [trainerCurrentPage, setTrainerCurrentPage] = useState(1);
+  const TRAINER_PER_PAGE = 20;
+  
+  // État pour les rendez-vous passés (chargés séparément via l'endpoint /passes)
+  const [pastAppointments, setPastAppointments] = useState([]);
+  const [pastAppointmentsLoading, setPastAppointmentsLoading] = useState(false);
+  const [pastAppointmentsPage, setPastAppointmentsPage] = useState(1);
+  const [pastAppointmentsTotal, setPastAppointmentsTotal] = useState(0);
+  const [pastAppointmentsShowingFrom, setPastAppointmentsShowingFrom] = useState(0);
+  const [pastAppointmentsShowingTo, setPastAppointmentsShowingTo] = useState(0);
+  const PAST_PER_PAGE = 20;
+
+  // État pour la suppression multiple (uniquement pour formateurs)
+  const [selectedAppointments, setSelectedAppointments] = useState(new Set());
+  const [isDeleting, setIsDeleting] = useState(false);
 
   // Filtres simplifiés (JS)
   const [filters, setFilters] = useState({
@@ -167,8 +206,179 @@ const SLOT_MINUTES = 30;
 
   // Modales de création/édition
   const [showCreate, setShowCreate] = useState(false);
-  const [newAppt, setNewAppt] = useState({ patient: '', medecin: '', motif: '', date: '', heure: '', duree: '30', notes: '' });
+  const [newAppt, setNewAppt] = useState({ patient: '', medecin: '', motif: '', date: '', heure: '', duree: '30', notes: '', urgenceMedecin: false });
   const [createError, setCreateError] = useState('');
+  
+  const [showEdit, setShowEdit] = useState(false);
+  const [editApptId, setEditApptId] = useState(null);
+  const [editAppt, setEditAppt] = useState({ patient: '', medecin: '', motif: '', date: '', heure: '', duree: '30', notes: '', urgenceMedecin: false });
+  const [editError, setEditError] = useState('');
+  const [editStatusId, setEditStatusId] = useState(null);
+  const [editStatusValue, setEditStatusValue] = useState('');
+  
+  // Recherche intelligente de patient pour création
+  const [patientSearchCreate, setPatientSearchCreate] = useState('');
+  const [showPatientResultsCreate, setShowPatientResultsCreate] = useState(false);
+  const [selectedPatientCreate, setSelectedPatientCreate] = useState(null);
+  
+  // Recherche intelligente de patient pour édition
+  const [patientSearchEdit, setPatientSearchEdit] = useState('');
+  const [showPatientResultsEdit, setShowPatientResultsEdit] = useState(false);
+  const [selectedPatientEdit, setSelectedPatientEdit] = useState(null);
+  
+  // Fonction de normalisation pour la recherche (ignore accents, casse, espaces)
+  const normalizeSearch = (str) => {
+    if (!str) return '';
+    return str
+      .toString()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim();
+  };
+  
+  // Fonction de recherche intelligente de patient
+  const searchPatients = (query, patientList) => {
+    if (!query || query.trim() === '') return patientList.slice(0, 50); // Limiter à 50 résultats
+    
+    const normalizedQuery = normalizeSearch(query);
+    const queryWords = normalizedQuery.split(/\s+/).filter(w => w.length > 0);
+    
+    return patientList.filter(p => {
+      const id = getPatientId(p);
+      if (!id) return false;
+      
+      // Récupérer toutes les informations du patient
+      const prenom = normalizeSearch(p.prenom || p.firstName || '');
+      const nom = normalizeSearch(p.nom || p.lastName || '');
+      const email = normalizeSearch(p.email || '');
+      const telephone = normalizeSearch(p.telephone || p.phone || '');
+      const numeroSecu = normalizeSearch(p.numeroSecu || p.numeroSecuriteSociale || '');
+      const fullName = `${prenom} ${nom}`.trim();
+      
+      // Vérifier si tous les mots de la requête sont présents
+      return queryWords.every(word => 
+        prenom.includes(word) ||
+        nom.includes(word) ||
+        fullName.includes(word) ||
+        email.includes(word) ||
+        telephone.includes(word) ||
+        numeroSecu.includes(word) ||
+        id.includes(word)
+      );
+    }).slice(0, 20); // Limiter à 20 résultats pour l'affichage
+  };
+  
+  // Patients filtrés pour création
+  const filteredPatientsCreate = useMemo(() => {
+    return searchPatients(patientSearchCreate, patients);
+  }, [patientSearchCreate, patients]);
+  
+  // Patients filtrés pour édition
+  const filteredPatientsEdit = useMemo(() => {
+    return searchPatients(patientSearchEdit, patients);
+  }, [patientSearchEdit, patients]);
+  
+  // Gérer la sélection d'un patient (création)
+  const handleSelectPatientCreate = (patient) => {
+    const id = getPatientId(patient);
+    if (!id) return;
+    
+    const info = getPatientStatusInfo(patient);
+    if (info.isDeceased) {
+      setCreateError("Ce patient est déclaré décédé. Veuillez choisir un autre patient.");
+      return;
+    }
+    
+    setNewAppt(prev => ({ ...prev, patient: id }));
+    setSelectedPatientCreate(patient);
+    setPatientSearchCreate(getPatientNameString(patient, false) || patient.email || `Patient ${id}`);
+    setShowPatientResultsCreate(false);
+    setCreateError('');
+  };
+  
+  // Gérer la sélection d'un patient (édition)
+  const handleSelectPatientEdit = (patient) => {
+    const id = getPatientId(patient);
+    if (!id) return;
+    
+    const info = getPatientStatusInfo(patient);
+    if (info.isDeceased) {
+      setEditError("Ce patient est déclaré décédé. Veuillez choisir un autre patient.");
+      return;
+    }
+    
+    setEditAppt(prev => ({ ...prev, patient: id }));
+    setSelectedPatientEdit(patient);
+    setPatientSearchEdit(getPatientNameString(patient, false) || patient.email || `Patient ${id}`);
+    setShowPatientResultsEdit(false);
+    setEditError('');
+  };
+  
+  // Réinitialiser la recherche patient lors de l'ouverture/fermeture des modales
+  useEffect(() => {
+    if (showCreate) {
+      if (newAppt.patient) {
+        const selected = patients.find(p => getPatientId(p) === String(newAppt.patient));
+        if (selected) {
+          setSelectedPatientCreate(selected);
+          setPatientSearchCreate(getPatientNameString(selected, false) || selected.email || `Patient ${getPatientId(selected)}`);
+        } else {
+          setSelectedPatientCreate(null);
+          setPatientSearchCreate('');
+        }
+      } else {
+        setSelectedPatientCreate(null);
+        setPatientSearchCreate('');
+      }
+      setShowPatientResultsCreate(false);
+    } else {
+      setPatientSearchCreate('');
+      setSelectedPatientCreate(null);
+      setShowPatientResultsCreate(false);
+    }
+  }, [showCreate, newAppt.patient, patients]);
+  
+  useEffect(() => {
+    if (showEdit) {
+      if (editAppt.patient) {
+        const selected = patients.find(p => getPatientId(p) === String(editAppt.patient));
+        if (selected) {
+          setSelectedPatientEdit(selected);
+          setPatientSearchEdit(getPatientNameString(selected, false) || selected.email || `Patient ${getPatientId(selected)}`);
+        } else {
+          setSelectedPatientEdit(null);
+          setPatientSearchEdit('');
+        }
+      } else {
+        setSelectedPatientEdit(null);
+        setPatientSearchEdit('');
+      }
+      setShowPatientResultsEdit(false);
+    } else {
+      setPatientSearchEdit('');
+      setSelectedPatientEdit(null);
+      setShowPatientResultsEdit(false);
+    }
+  }, [showEdit, editAppt.patient, patients]);
+  
+  // Fermer les résultats de recherche lors d'un clic en dehors
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (showPatientResultsCreate && !event.target.closest('.patient-search-create')) {
+        setShowPatientResultsCreate(false);
+      }
+      if (showPatientResultsEdit && !event.target.closest('.patient-search-edit')) {
+        setShowPatientResultsEdit(false);
+      }
+    };
+    
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showPatientResultsCreate, showPatientResultsEdit]);
+  
   useEffect(() => {
     if (!newAppt.patient) return;
     const selected = patients.find(p => getPatientId(p) === String(newAppt.patient));
@@ -179,10 +389,6 @@ const SLOT_MINUTES = 30;
       setCreateError(prev => prev || "Ce patient est déclaré décédé. Veuillez choisir un autre patient.");
     }
   }, [patients, newAppt.patient]);
-  const [showEdit, setShowEdit] = useState(false);
-  const [editApptId, setEditApptId] = useState(null);
-  const [editAppt, setEditAppt] = useState({ patient: '', medecin: '', motif: '', date: '', heure: '', duree: '30', notes: '' });
-  const [editError, setEditError] = useState('');
 
   // Chargement des données
   const loadAppointments = useCallback(async () => {
@@ -229,32 +435,47 @@ const SLOT_MINUTES = 30;
         }),
       };
       
-      // IMPORTANT : Utiliser getAllAppointmentsHistory par défaut (sans filtre de date)
-      // pour voir TOUS les rendez-vous futurs, pas seulement ceux de la semaine
-      // Seulement utiliser getAllAppointments si un filtre de date spécifique est défini
+      // Utiliser la même méthode que le dashboard pour avoir tous les RDV d'aujourd'hui
+      // Si pas de filtre de date, utiliser getFutureAppointments avec la date d'aujourd'hui
+      // pour inclure tous les rendez-vous d'aujourd'hui (même passés)
+      let data;
+      if (!hasDateFilter) {
+        const today = new Date().toISOString().slice(0, 10);
+        // OPTIMISATION: Utiliser getFutureAppointments qui est plus optimisé
+        data = await appointmentService.getFutureAppointments({ date: today });
+      } else {
+        // Si un filtre de date est défini, utiliser getAppointments (sans slash final)
+        data = await appointmentService.getAppointments(apiFilters);
+      }
+      let list = Array.isArray(data) ? data : [];
       
-      // Par défaut (sans filtre de date), utiliser /rendez-vous/tous pour voir TOUS les rendez-vous
-      // Si un filtre de date est défini, utiliser /rendez-vous/ avec les paramètres de date
-      const appointmentMethod = (apiFilters.useHistoryEndpoint || !hasDateFilter)
-        ? appointmentService.getAllAppointmentsHistory  // Utiliser /rendez-vous/tous pour voir tous les RDV
-        : appointmentService.getAllAppointments;        // Utiliser /rendez-vous/ seulement si filtre de date
-      
-      // Log pour debug
-      if (import.meta.env.DEV) {
-        console.log('📅 Chargement rendez-vous:', {
-          hasDateFilter,
-          dateDebut: filters.dateDebut,
-          dateFin: filters.dateFin,
-          method: appointmentMethod === appointmentService.getAllAppointmentsHistory ? '/rendez-vous/tous' : '/rendez-vous/',
-          filters: apiFilters
+      // Pour les stagiaires : filtrer uniquement leurs propres créations
+      if (!isFormateur && !isAdmin && currentUserId && currentUserIri) {
+        list = list.filter(appt => {
+          const creator = appt.createdBy || appt.created_by || appt.creePar || appt.user || null;
+          if (!creator) return false;
+          
+          // Si creator est un objet
+          if (typeof creator === 'object') {
+            const creatorId = creator.id;
+            const creatorIri = creator['@id'] || (creatorId ? `/api/users/${creatorId}` : null);
+            return String(creatorId) === String(currentUserId) || creatorIri === currentUserIri;
+          }
+          
+          // Si creator est une string (IRI)
+          if (typeof creator === 'string') {
+            const creatorId = creator.includes('/') ? creator.split('/').pop() : creator;
+            return String(creatorId) === String(currentUserId) || creator === currentUserIri;
+          }
+          
+          // Si creator est un nombre (ID)
+          if (typeof creator === 'number') {
+            return String(creator) === String(currentUserId);
+          }
+          
+          return false;
         });
       }
-      
-      const [data, statusAgg] = await Promise.all([
-        appointmentMethod(apiFilters),
-        appointmentService.getRendezVousStatus().catch(() => null)
-      ]);
-      let list = Array.isArray(data) ? data : [];
       
       // Filtrer par médecin côté client aussi (pour être sûr)
       if (selectedMedecinId) {
@@ -320,49 +541,370 @@ const SLOT_MINUTES = 30;
         absents: list.filter(a => a.statut === 'ABSENT').length, // Tous les absents (filtrés par médecin si sélectionné)
       });
     } catch (err) {
-      console.error("Erreur lors du chargement des rendez-vous:", err);
       setError(err);
     } finally {
       setLoading(false);
     }
   }, [filters, selectedMedecinId, medecinsById]);
 
-  // Charger référentiels
+  // Charger référentiels avec gestion d'erreur améliorée
   useEffect(() => {
+    let cancelled = false;
     (async () => {
       try {
-        const [p, m] = await Promise.all([
-          patientService.getAllPatients({ limit: 200 }).catch(() => []),
-          medecinService.getAllMedecins().catch(() => [])
+        // OPTIMISATION: Charger en parallèle avec timeout individuel et gestion d'erreur silencieuse
+        const [p, m] = await Promise.allSettled([
+          // Utiliser l'endpoint optimisé /patients-all pour récupérer les patients du stagiaire
+          patientService.getStagiairePatients(1, 200, {}).catch(() => []),
+          medecinService.getAllMedecins(true) // silent = true pour éviter les logs répétés
         ]);
-        setPatients(Array.isArray(p) ? p : []);
-        setMedecins(Array.isArray(m) ? m : []);
-      } catch {}
+        
+        if (!cancelled) {
+          setPatients(Array.isArray(p.value) ? p.value : []);
+          setMedecins(Array.isArray(m.value) ? m.value : []);
+        }
+      } catch (error) {
+        // Erreur silencieuse - les données seront vides mais la page s'affichera
+        if (!cancelled) {
+          setPatients([]);
+          setMedecins([]);
+        }
+      }
     })();
+    
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
 
-  // Charger RDV créés par des stagiaires (vue formateur)
+  // Charger RDV créés par des stagiaires (vue formateur) - Récupérer toutes les pages
   useEffect(() => {
     if (!isFormateur) return;
     (async () => {
       try {
         setTrainerLoading(true);
-        const page1 = await appointmentService.getFormateurAppointments(1, 50);
-        const list = Array.isArray(page1) ? page1 : [];
-        list.sort((a, b) => new Date(a.startAt || a.start_at || a.dateTime || 0) - new Date(b.startAt || b.start_at || b.dateTime || 0));
-        setTrainerAppointments(list);
+        let allAppointments = [];
+        let currentPage = 1;
+        let hasMore = true;
+        
+        // Récupérer toutes les pages depuis l'endpoint principal
+        while (hasMore) {
+          const result = await appointmentService.getFormateurAppointments(currentPage, 100);
+          const list = Array.isArray(result.data) ? result.data : [];
+          const pagination = result.pagination;
+          
+          if (list.length > 0) {
+            allAppointments = [...allAppointments, ...list];
+            
+            // Utiliser les informations de pagination si disponibles
+            if (pagination) {
+              const totalPages = pagination.total_pages || Math.ceil((pagination.total || 0) / (pagination.per_page || 100));
+              if (currentPage >= totalPages) {
+                hasMore = false;
+              } else {
+                currentPage++;
+              }
+            } else {
+              // Fallback : si on a moins de 100 résultats, on a récupéré toutes les pages
+              if (list.length < 100) {
+                hasMore = false;
+              } else {
+                currentPage++;
+              }
+            }
+          } else {
+            hasMore = false;
+          }
+        }
+        
+        // Trier par date (plus ancien au plus récent pour les rendez-vous à venir)
+        allAppointments.sort((a, b) => new Date(a.startAt || a.start_at || a.dateTime || 0) - new Date(b.startAt || b.start_at || b.dateTime || 0));
+        setTrainerAppointments(allAppointments);
       } finally {
         setTrainerLoading(false);
       }
     })();
   }, [isFormateur]);
 
-  // Résolution externe désactivée: l'endpoint formateur renvoie désormais created_by complet
-  useEffect(() => { /* no-op */ }, [isFormateur, trainerAppointments]);
+  // Charger les rendez-vous passés via l'endpoint dédié
+  const loadPastAppointments = useCallback(async (page = 1) => {
+    if (!isFormateur) return;
+    try {
+      setPastAppointmentsLoading(true);
+      const result = await appointmentService.getPastAppointments({
+        page,
+        per_page: PAST_PER_PAGE
+      });
+      const data = Array.isArray(result.data) ? result.data : [];
+      setPastAppointments(data);
+      setPastAppointmentsTotal(result.pagination?.total || data.length);
+      setPastAppointmentsShowingFrom(result.pagination?.showing_from || 0);
+      setPastAppointmentsShowingTo(result.pagination?.showing_to || 0);
+    } catch (error) {
+      setPastAppointments([]);
+      setPastAppointmentsTotal(0);
+      setPastAppointmentsShowingFrom(0);
+      setPastAppointmentsShowingTo(0);
+    } finally {
+      setPastAppointmentsLoading(false);
+    }
+  }, [isFormateur]);
 
-  // Enrichissement via détails désactivé (le back fournit created_by directement)
-  useEffect(() => { /* no-op */ }, [isFormateur, trainerAppointments, creatorLabelByRdv]);
+  // Charger les rendez-vous passés au montage et quand la page change
+  useEffect(() => {
+    if (isFormateur && trainerFilter === 'passes') {
+      loadPastAppointments(pastAppointmentsPage);
+    }
+  }, [isFormateur, trainerFilter, pastAppointmentsPage, loadPastAppointments]);
+
+  // Fonction de suppression simple
+  const handleDeleteAppointment = useCallback(async (rdvId) => {
+    if (!window.confirm('Êtes-vous sûr de vouloir supprimer ce rendez-vous ?')) {
+      return;
+    }
+    try {
+      setIsDeleting(true);
+      await appointmentService.deleteAppointment(rdvId);
+      // Recharger les données
+      if (isFormateur) {
+        if (trainerFilter === 'passes') {
+          await loadPastAppointments(pastAppointmentsPage);
+        } else {
+          // Recharger les rendez-vous à venir (toutes les pages)
+          const loadTrainerAppointments = async () => {
+            setTrainerLoading(true);
+            try {
+              let allAppointments = [];
+              let currentPage = 1;
+              let hasMore = true;
+              
+              while (hasMore) {
+                const result = await appointmentService.getFormateurAppointments(currentPage, 100);
+                const list = Array.isArray(result.data) ? result.data : [];
+                const pagination = result.pagination;
+                
+                if (list.length > 0) {
+                  allAppointments = [...allAppointments, ...list];
+                  
+                  if (pagination) {
+                    const totalPages = pagination.total_pages || Math.ceil((pagination.total || 0) / (pagination.per_page || 100));
+                    if (currentPage >= totalPages) {
+                      hasMore = false;
+                    } else {
+                      currentPage++;
+                    }
+                  } else {
+                    if (list.length < 100) {
+                      hasMore = false;
+                    } else {
+                      currentPage++;
+                    }
+                  }
+                } else {
+                  hasMore = false;
+                }
+              }
+              
+              allAppointments.sort((a, b) => new Date(a.startAt || a.start_at || a.dateTime || 0) - new Date(b.startAt || b.start_at || b.dateTime || 0));
+              setTrainerAppointments(allAppointments);
+            } catch (err) {
+              // Erreur silencieuse lors du rechargement
+            } finally {
+              setTrainerLoading(false);
+            }
+          };
+          await loadTrainerAppointments();
+        }
+      } else {
+        await loadAppointments();
+      }
+      alert('Rendez-vous supprimé avec succès');
+    } catch (error) {
+      alert('Erreur lors de la suppression du rendez-vous');
+    } finally {
+      setIsDeleting(false);
+    }
+  }, [isFormateur, trainerFilter, pastAppointmentsPage, loadPastAppointments]);
+
+  // Fonction de suppression multiple (uniquement pour formateurs)
+  const handleBulkDelete = useCallback(async () => {
+    if (selectedAppointments.size === 0) {
+      alert('Veuillez sélectionner au moins un rendez-vous à supprimer');
+      return;
+    }
+    if (!window.confirm(`Êtes-vous sûr de vouloir supprimer ${selectedAppointments.size} rendez-vous(s) ?`)) {
+      return;
+    }
+    try {
+      setIsDeleting(true);
+      const ids = Array.from(selectedAppointments);
+      const result = await appointmentService.bulkDeleteAppointments(ids);
+      
+      // Afficher le résultat
+      let message = result.message || `${result.deleted_count} rendez-vous supprimé(s)`;
+      if (result.skipped_count > 0) {
+        message += `, ${result.skipped_count} ignoré(s)`;
+      }
+      if (result.errors && result.errors.length > 0) {
+        message += '\n\nErreurs:\n' + result.errors.join('\n');
+      }
+      alert(message);
+      
+      // Réinitialiser la sélection
+      setSelectedAppointments(new Set());
+      
+      // Recharger les données
+      if (trainerFilter === 'passes') {
+        await loadPastAppointments(pastAppointmentsPage);
+      } else {
+        const loadTrainerAppointments = async () => {
+          setTrainerLoading(true);
+          try {
+            let allAppointments = [];
+            let currentPage = 1;
+            let hasMore = true;
+            
+            while (hasMore) {
+              const result = await appointmentService.getFormateurAppointments(currentPage, 100);
+              const list = Array.isArray(result.data) ? result.data : [];
+              const pagination = result.pagination;
+              
+              if (list.length > 0) {
+                allAppointments = [...allAppointments, ...list];
+                
+                if (pagination) {
+                  const totalPages = pagination.total_pages || Math.ceil((pagination.total || 0) / (pagination.per_page || 100));
+                  if (currentPage >= totalPages) {
+                    hasMore = false;
+                  } else {
+                    currentPage++;
+                  }
+                } else {
+                  if (list.length < 100) {
+                    hasMore = false;
+                  } else {
+                    currentPage++;
+                  }
+                }
+              } else {
+                hasMore = false;
+              }
+            }
+            
+            allAppointments.sort((a, b) => new Date(a.startAt || a.start_at || a.dateTime || 0) - new Date(b.startAt || b.start_at || b.dateTime || 0));
+            setTrainerAppointments(allAppointments);
+          } catch (err) {
+            // Erreur silencieuse lors du rechargement
+          } finally {
+            setTrainerLoading(false);
+          }
+        };
+        await loadTrainerAppointments();
+      }
+    } catch (error) {
+      if (error.response?.status === 403) {
+        alert('Accès refusé : vous n\'avez pas les permissions pour supprimer plusieurs rendez-vous');
+      } else {
+        alert('Erreur lors de la suppression multiple');
+      }
+    } finally {
+      setIsDeleting(false);
+    }
+  }, [selectedAppointments, trainerFilter, pastAppointmentsPage, loadPastAppointments]);
+
+  // Gérer la sélection/désélection d'un rendez-vous
+  const toggleAppointmentSelection = useCallback((rdvId) => {
+    setSelectedAppointments(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(rdvId)) {
+        newSet.delete(rdvId);
+      } else {
+        newSet.add(rdvId);
+      }
+      return newSet;
+    });
+  }, []);
+
+  // Sélectionner/désélectionner tous les rendez-vous de la page (sera défini dans le scope formateur)
+
+  // Charger les médecins manquants depuis trainerAppointments (pour le formateur)
+  useEffect(() => {
+    if (!isFormateur || !trainerAppointments.length) return;
+    const missingIds = new Set();
+    for (const appt of trainerAppointments || []) {
+      const m = appt?.medecin || appt?.doctor;
+      if (typeof m === 'string') {
+        const iri = m;
+        const id = iri.includes('/') ? iri.split('/').pop() : iri;
+        if (id && !medecinsById[id]) missingIds.add(id);
+      } else if (m && typeof m === 'object' && m.id && !medecinsById[m.id]) {
+        // Si c'est un objet avec un ID mais pas encore dans le cache
+        missingIds.add(m.id);
+      }
+    }
+    if (missingIds.size === 0) return;
+    (async () => {
+      try {
+        const loaded = [];
+        for (const id of Array.from(missingIds)) {
+          try {
+            const one = await medecinService.getOneMedecin(id);
+            if (one) loaded.push(one);
+          } catch {}
+        }
+        if (loaded.length) {
+          setMedecins(prev => {
+            const byId = new Set((prev || []).map(p => p.id));
+            const merged = [...prev];
+            for (const m of loaded) {
+              if (!byId.has(m.id)) { merged.push(m); byId.add(m.id); }
+            }
+            return merged;
+          });
+        }
+      } catch {}
+    })();
+  }, [trainerAppointments, medecinsById, isFormateur]);
+
+  // Charger les médecins manquants depuis pastAppointments (pour le formateur)
+  useEffect(() => {
+    if (!isFormateur || !pastAppointments.length) return;
+    const missingIds = new Set();
+    for (const appt of pastAppointments || []) {
+      const m = appt?.medecin || appt?.doctor;
+      if (typeof m === 'string') {
+        const iri = m;
+        const id = iri.includes('/') ? iri.split('/').pop() : iri;
+        if (id && !medecinsById[id]) missingIds.add(id);
+      } else if (m && typeof m === 'object' && m.id && !medecinsById[m.id]) {
+        missingIds.add(m.id);
+      }
+    }
+    if (missingIds.size === 0) return;
+    (async () => {
+      try {
+        const loaded = [];
+        for (const id of Array.from(missingIds)) {
+          try {
+            const one = await medecinService.getOneMedecin(id);
+            if (one) loaded.push(one);
+          } catch {}
+        }
+        if (loaded.length) {
+          setMedecins(prev => {
+            const byId = new Set((prev || []).map(p => p.id));
+            const merged = [...prev];
+            for (const m of loaded) {
+              if (!byId.has(m.id)) { merged.push(m); byId.add(m.id); }
+            }
+            return merged;
+          });
+        }
+      } catch {}
+    })();
+  }, [pastAppointments, medecinsById, isFormateur]);
+
 
   // Recharger quand les filtres changent
   // Ne pas inclure loadAppointments dans les dépendances pour éviter les boucles
@@ -377,21 +919,173 @@ const SLOT_MINUTES = 30;
   // Pré-remplir le médecin sélectionné lors de l'ouverture du modal de création
   useEffect(() => {
     if (!showCreate || !selectedMedecinId) return;
-    setNewAppt(prev => {
-      if (prev.medecin === selectedMedecinId) return prev;
-      return { ...prev, medecin: selectedMedecinId };
-    });
+      setNewAppt(prev => {
+        if (prev.medecin === selectedMedecinId) return prev;
+        return { ...prev, medecin: selectedMedecinId };
+      });
   }, [showCreate, selectedMedecinId]);
+
+  // Génère les 6 semaines affichées (42 cases), en commençant lundi
+  const calendarDays = useMemo(() => {
+    const year = currentMonth.getFullYear();
+    const month = currentMonth.getMonth();
+    const firstDay = new Date(year, month, 1);
+    const start = new Date(firstDay);
+    const offset = dayIndexMondayFirst(firstDay);
+    start.setDate(1 - offset);
+    const days = [];
+    const cursor = new Date(start);
+    for (let i = 0; i < 42; i++) {
+      days.push(new Date(cursor));
+      cursor.setDate(cursor.getDate() + 1);
+    }
+    return days;
+  }, [currentMonth]);
+
+  // Créneaux demi-heure
+  const timeSlots = useMemo(() => {
+    const slots = [];
+    for (let hour = HOURS_START; hour < HOURS_END; hour++) {
+      for (let minute = 0; minute < 60; minute += SLOT_MINUTES) {
+        const start = `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`;
+        const endMinutesTotal = hour * 60 + minute + SLOT_MINUTES;
+        const endH = Math.floor(endMinutesTotal / 60);
+        const endM = endMinutesTotal % 60;
+        const end = `${endH.toString().padStart(2, "0")}:${endM.toString().padStart(2, "0")}`;
+        slots.push({ start, end });
+      }
+    }
+    return slots;
+  }, []);
+
+  // Utiliser les utilitaires centralisés pour les statuts
+  const getPlanningClasses = (statut) => {
+    const config = getAppointmentStatusClasses(statut);
+    return { box: config.box, badge: config.badge, border: config.border };
+  };
+
+  const getListBg = (statut) => {
+    return getAppointmentStatusClasses(statut).listBg;
+  };
+
+  const getStatusBadgeClasses = (statut) => {
+    return getAppointmentStatusClasses(statut).badge;
+  };
+
+  // Utiliser l'utilitaire centralisé
+  const getDoctorName = (appt) => getDoctorNameFromAppointment(appt, medecinsById);
+
+  // RDV filtrés sur la journée sélectionnée
+  const dayAppointments = useMemo(() => {
+    const day = selectedDate;
+    return (appointments || [])
+      .filter(r => r?.statut !== 'ANNULE')
+      .filter(r => {
+        const d = new Date(r.startAt || r.start_at || r.appointmentTime || r.startTime || r.dateTime);
+        return !isNaN(d) && sameDay(d, day);
+      });
+  }, [appointments, selectedDate]);
+
+  // Indexation des RDV par créneau (HH:mm)
+  const appointmentsBySlot = useMemo(() => {
+    const map = new Map();
+    timeSlots.forEach(slot => map.set(slot.start, []));
+    for (const appt of dayAppointments) {
+      const dateFields = [appt.startAt, appt.start_at, appt.appointmentTime, appt.startTime, appt.dateTime];
+      let key = '';
+      for (const field of dateFields) {
+        if (!field) continue;
+        const hhmm = extractHHmm(field);
+        if (hhmm) { key = hhmm; break; }
+      }
+      if (key && map.has(key)) map.get(key).push(appt);
+    }
+    return map;
+  }, [dayAppointments, timeSlots]);
+
+  // Utiliser l'utilitaire centralisé
+  const getApptDurationMinutes = (appt) => getAppointmentDuration(appt);
+
+  const occupiedContinuationSlots = useMemo(() => {
+    const occupied = new Set();
+    const slotIndexByStart = new Map(timeSlots.map((s, idx) => [s.start, idx]));
+    for (const appt of dayAppointments) {
+      const dateFields = [appt.startAt, appt.start_at, appt.appointmentTime, appt.startTime, appt.dateTime];
+      let startKey = '';
+      for (const field of dateFields) {
+        if (!field) continue;
+        const hhmm = extractHHmm(field);
+        if (hhmm) { startKey = hhmm; break; }
+      }
+      if (!startKey) continue;
+      const startIdx = slotIndexByStart.get(startKey);
+      if (startIdx === undefined) continue;
+      const dureeMin = getApptDurationMinutes(appt);
+      const slotsToCover = Math.ceil(dureeMin / SLOT_MINUTES);
+      for (let i = 1; i < slotsToCover; i++) {
+        const nextIdx = startIdx + i;
+        if (nextIdx < timeSlots.length) {
+          occupied.add(timeSlots[nextIdx].start);
+        }
+      }
+    }
+    return occupied;
+  }, [dayAppointments, timeSlots]);
 
   // Vue exclusive pour FORMATEUR: afficher uniquement la liste des RDV créés par des stagiaires
   if (isFormateur) {
+    // Séparer les rendez-vous en passés et à venir
+    const now = new Date();
+    const upcomingAppointments = trainerAppointments.filter(rdv => {
+      const rdvDate = new Date(rdv.startAt || rdv.start_at || rdv.dateTime || 0);
+      return rdvDate >= now;
+    });
+    
+    // Pour les rendez-vous passés, utiliser ceux chargés via l'endpoint /passes
+    // Pour les rendez-vous à venir, utiliser ceux chargés via l'endpoint principal
+    // Filtrer selon le filtre sélectionné
+    let filteredAppointments = [];
+    let totalPages = 1;
+    let paginatedAppointments = [];
+    
+    if (trainerFilter === 'a_venir') {
+      filteredAppointments = upcomingAppointments;
+      totalPages = Math.ceil(filteredAppointments.length / TRAINER_PER_PAGE);
+      const startIndex = (trainerCurrentPage - 1) * TRAINER_PER_PAGE;
+      const endIndex = startIndex + TRAINER_PER_PAGE;
+      paginatedAppointments = filteredAppointments.slice(startIndex, endIndex);
+    } else {
+      // trainerFilter === 'passes'
+      // Utiliser les rendez-vous passés chargés via l'endpoint /passes
+      filteredAppointments = pastAppointments;
+      // Pour les rendez-vous passés, on utilise la pagination serveur
+      // Calculer le nombre total de pages à partir du total et de la taille de page
+      totalPages = pastAppointmentsTotal > 0 
+        ? Math.ceil(pastAppointmentsTotal / PAST_PER_PAGE)
+        : 1;
+      paginatedAppointments = filteredAppointments; // Déjà paginés côté serveur
+    }
+
+    // Sélectionner/désélectionner tous les rendez-vous de la page
+    const toggleSelectAll = () => {
+      const allIds = paginatedAppointments.map(rdv => rdv.id).filter(Boolean);
+      if (selectedAppointments.size === paginatedAppointments.length && 
+          allIds.every(id => selectedAppointments.has(id))) {
+        setSelectedAppointments(new Set());
+      } else {
+        setSelectedAppointments(new Set(allIds));
+      }
+    };
+    
     return (
-      <div className="min-h-screen p-6">
+      <div className="min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6">
         <div className="text-center py-6">
-          <div className="bg-pink-200 rounded-lg shadow p-6 max-w-xl mx-auto">
+          <div className="bg-pink-200 rounded-lg shadow p-6 max-w-2xl mx-auto">
             <div className="flex items-center justify-center gap-3 mb-2">
-              <div className="w-12 h-12 bg-pink-100 rounded-full flex items-center justify-center shadow-sm">
-                <span className="material-symbols-rounded text-pink-600 text-2xl">calendar_month</span>
+              <div className="w-16 h-16 bg-pink-100 rounded-full flex items-center justify-center shadow-sm">
+                <svg className="w-8 h-8 text-pink-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                </svg>
               </div>
               <h1 className="text-2xl font-bold text-pink-800">Rendez-Vous</h1>
             </div>
@@ -399,43 +1093,124 @@ const SLOT_MINUTES = 30;
           </div>
         </div>
 
+        {/* Boutons de filtre */}
+        <div className="mb-6 flex justify-center gap-3 flex-wrap">
+          <button
+            onClick={() => {
+              setTrainerFilter('a_venir');
+              setTrainerCurrentPage(1);
+            }}
+            className={`px-4 py-2 rounded-lg font-semibold transition-colors flex items-center gap-2 ${
+              trainerFilter === 'a_venir'
+                ? 'bg-green-600 text-white shadow-md'
+                : 'bg-white text-green-700 hover:bg-green-50 border border-green-300'
+            }`}
+          >
+            <span className="material-symbols-rounded text-2xl">schedule</span>
+            À venir ({upcomingAppointments.length})
+          </button>
+          <button
+            onClick={() => {
+              setTrainerFilter('passes');
+              setTrainerCurrentPage(1);
+              setPastAppointmentsPage(1);
+            }}
+            className={`px-4 py-2 rounded-lg font-semibold transition-colors flex items-center gap-2 ${
+              trainerFilter === 'passes'
+                ? 'bg-gray-600 text-white shadow-md'
+                : 'bg-white text-gray-700 hover:bg-gray-50 border border-gray-300'
+            }`}
+          >
+            <span className="material-symbols-rounded text-2xl">history</span>
+            Passés ({pastAppointmentsTotal || pastAppointments.length})
+          </button>
+        </div>
+
         <div className="bg-pink-200 rounded-lg shadow">
           <div className="px-6 py-4 border-b-2 border-pink-300 bg-pink-50 flex items-center justify-between gap-3 flex-wrap">
-            <h3 className="text-lg font-semibold text-pink-800 flex items-center gap-2 m-0">
+            <h3 className="text-2xl font-semibold text-pink-800 flex items-center gap-2 m-0">
               <span className="material-symbols-rounded text-pink-600">assignment_ind</span>
               Liste des rendez-vous
-              <span className="ml-2 inline-flex items-center px-2 py-0.5 text-xs rounded-full bg-pink-100 text-pink-800 border border-pink-300">{trainerAppointments.length}</span>
+              <span className="ml-2 inline-flex items-center px-2 py-0.5 text-xs rounded-full bg-pink-100 text-pink-800 border border-pink-300">
+                {trainerFilter === 'passes' 
+                  ? (pastAppointmentsShowingFrom && pastAppointmentsShowingTo
+                      ? `${pastAppointmentsShowingFrom}-${pastAppointmentsShowingTo} sur ${pastAppointmentsTotal || pastAppointments.length}`
+                      : (() => {
+                          const showingFrom = (pastAppointmentsPage - 1) * PAST_PER_PAGE + 1;
+                          const showingTo = Math.min(pastAppointmentsPage * PAST_PER_PAGE, pastAppointmentsTotal || pastAppointments.length);
+                          return `${showingFrom}-${showingTo} sur ${pastAppointmentsTotal || pastAppointments.length}`;
+                        })())
+                  : (() => {
+                      const showingFrom = (trainerCurrentPage - 1) * TRAINER_PER_PAGE + 1;
+                      const showingTo = Math.min(trainerCurrentPage * TRAINER_PER_PAGE, upcomingAppointments.length);
+                      return `${showingFrom}-${showingTo} sur ${upcomingAppointments.length}`;
+                    })()
+                }
+              </span>
             </h3>
           </div>
 
           <div className="p-6">
-            {trainerLoading ? (
+            {(trainerLoading || (trainerFilter === 'passes' && pastAppointmentsLoading)) ? (
               <div className="text-center py-6 text-pink-700">Chargement…</div>
-            ) : trainerAppointments.length === 0 ? (
-              <div className="text-center py-6 text-gray-500">Aucun rendez-vous créé par des stagiaires</div>
+            ) : filteredAppointments.length === 0 ? (
+              <div className="text-center py-6 text-gray-500">
+                {trainerFilter === 'a_venir' && 'Aucun rendez-vous à venir'}
+                {trainerFilter === 'passes' && 'Aucun rendez-vous passé'}
+              </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full">
-                  <thead className="bg-pink-100">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Date</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Heure</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Patient</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Médecin</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Motif</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Statut</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Créé par</th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white divide-y divide-pink-200">
-                    {trainerAppointments.map((rdv, index) => {
+              <>
+                {/* Bouton de suppression multiple (uniquement pour formateurs) */}
+                {isFormateur && selectedAppointments.size > 0 && (
+                  <div className="mb-4 flex items-center justify-between bg-red-50 border border-red-200 rounded-lg p-3">
+                    <span className="text-sm text-red-700 font-medium">
+                      {selectedAppointments.size} rendez-vous sélectionné(s)
+                    </span>
+                    <button
+                      onClick={handleBulkDelete}
+                      disabled={isDeleting}
+                      className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-2"
+                    >
+                      <span className="material-symbols-rounded text-2xl">delete</span>
+                      Supprimer {selectedAppointments.size} rendez-vous
+                    </button>
+                  </div>
+                )}
+
+                <div className="w-full">
+                  <table className="w-full table-auto">
+                    <thead className="bg-pink-100">
+                      <tr>
+                        {isFormateur && (
+                          <th className="px-4 py-3 text-center">
+                            <input
+                              type="checkbox"
+                              checked={paginatedAppointments.length > 0 && selectedAppointments.size === paginatedAppointments.length}
+                              onChange={toggleSelectAll}
+                              className="w-4 h-4 text-pink-600 border-gray-300 rounded focus:ring-pink-500"
+                            />
+                          </th>
+                        )}
+                        <th className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider w-24`}>Date</th>
+                        <th className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider w-20`}>Heure</th>
+                        <th className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-center text-xs font-bold text-pink-700 uppercase tracking-wider`}>Patient</th>
+                        <th className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider`}>Médecin</th>
+                        <th className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider`}>Motif</th>
+                        <th className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider w-28`}>Statut</th>
+                        <th className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider`}>Créé par</th>
+                        <th className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider w-32`}>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-pink-200">
+                      {paginatedAppointments.map((rdv, index) => {
                       
                       const d = new Date(rdv.startAt || rdv.start_at || rdv.appointmentTime || rdv.startTime || rdv.dateTime);
                       const dateStr = !isNaN(d) ? d.toLocaleDateString('fr-FR') : '—';
                       const timeStr = !isNaN(d) ? d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : '—';
                       const patient = rdv.patient || {};
-                      const medecin = rdv.medecin || rdv.doctor || {};
                       const statut = rdv.statut || rdv.status || 'PLANIFIE';
+                      // Utiliser la fonction centralisée pour obtenir le nom du médecin
+                      const doctorName = getDoctorNameFromAppointment(rdv, medecinsById) || '—';
                       // Lecture prioritaire de l'endpoint formateur (objet complet)
                       const creatorObject = (rdv && typeof rdv.created_by === 'object') ? rdv.created_by : null;
                       const creatorRaw = creatorObject || rdv.created_by || rdv.createdBy || rdv.created_by_id || rdv.createdById || rdv.user_id || rdv.user || rdv.creePar || null;
@@ -476,19 +1251,144 @@ const SLOT_MINUTES = 30;
                       }
                       return (
                         <tr key={rdv.id || index} className="hover:bg-pink-50">
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{dateStr}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{timeStr}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{patient.prenom || ''} {patient.nom || ''}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{medecin.prenom || ''} {medecin.nom || ''}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{rdv.motif || '—'}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{statut}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{creatorName}</td>
+                          {isFormateur && (
+                            <td className="px-4 py-3 whitespace-nowrap text-center">
+                              <input
+                                type="checkbox"
+                                checked={selectedAppointments.has(rdv.id)}
+                                onChange={() => toggleAppointmentSelection(rdv.id)}
+                                className="w-4 h-4 text-pink-600 border-gray-300 rounded focus:ring-pink-500"
+                              />
+                            </td>
+                          )}
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 whitespace-nowrap text-sm text-gray-900 text-center`}>{dateStr}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 whitespace-nowrap text-sm text-gray-900 text-center`}>{timeStr}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-sm text-gray-900 text-center break-words`}>
+                            <div className="flex items-center justify-center gap-1">
+                              <PatientName patient={patient} />
+                              {hasUrgenceMedecin(rdv) && (
+                                <span className="material-symbols-rounded text-red-600 text-2xl" title="Urgence médecin">emergency</span>
+                              )}
+                            </div>
+                          </td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-sm text-gray-900 text-center break-words`}>{doctorName}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-sm text-gray-900 text-center break-words`}>{rdv.motif || '—'}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 whitespace-nowrap text-sm text-gray-900 text-center`}>{statut}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-sm text-gray-900 text-center break-words`}>{creatorName}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-6'} py-3 whitespace-nowrap text-sm text-center`}>
+                            {(isFormateur || isAdmin) && (
+                              <button
+                                onClick={() => handleDeleteAppointment(rdv.id)}
+                                disabled={isDeleting}
+                                className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-1 mx-auto"
+                                title="Supprimer ce rendez-vous"
+                              >
+                                <span className="material-symbols-rounded text-sm">delete</span>
+                                Supprimer
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       );
                     })}
-                  </tbody>
-                </table>
-              </div>
+                    </tbody>
+                  </table>
+                </div>
+                
+                {/* Pagination */}
+                {totalPages > 1 && (
+                  <div className="mt-6 flex items-center justify-between border-t border-pink-300 pt-4">
+                    <div className="text-sm text-gray-700">
+                      {trainerFilter === 'passes' ? (
+                        (() => {
+                          const showingFrom = pastAppointmentsShowingFrom || (pastAppointmentsPage - 1) * PAST_PER_PAGE + 1;
+                          const showingTo = pastAppointmentsShowingTo || Math.min(pastAppointmentsPage * PAST_PER_PAGE, pastAppointmentsTotal || pastAppointments.length);
+                          const total = pastAppointmentsTotal || pastAppointments.length;
+                          return <>Affichage de la page {pastAppointmentsPage} sur {totalPages} ({showingFrom}-{showingTo} sur {total})</>;
+                        })()
+                      ) : (
+                        (() => {
+                          const showingFrom = (trainerCurrentPage - 1) * TRAINER_PER_PAGE + 1;
+                          const showingTo = Math.min(trainerCurrentPage * TRAINER_PER_PAGE, filteredAppointments.length);
+                          return <>Affichage de {showingFrom} à {showingTo} sur {filteredAppointments.length} rendez-vous</>;
+                        })()
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          if (trainerFilter === 'passes') {
+                            const newPage = Math.max(1, pastAppointmentsPage - 1);
+                            setPastAppointmentsPage(newPage);
+                          } else {
+                            setTrainerCurrentPage(prev => Math.max(1, prev - 1));
+                          }
+                        }}
+                        disabled={trainerFilter === 'passes' ? pastAppointmentsPage === 1 : trainerCurrentPage === 1}
+                        className={`px-3 py-2 rounded-lg border transition-colors ${
+                          (trainerFilter === 'passes' ? pastAppointmentsPage === 1 : trainerCurrentPage === 1)
+                            ? "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+                            : "bg-white hover:bg-pink-50 border-pink-300 text-pink-700"
+                        }`}
+                      >
+                        <span className="material-symbols-rounded text-2xl">chevron_left</span>
+                      </button>
+                      <div className="flex items-center gap-1">
+                        {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
+                          let pageNum;
+                          const currentPage = trainerFilter === 'passes' ? pastAppointmentsPage : trainerCurrentPage;
+                          if (totalPages <= 5) {
+                            pageNum = i + 1;
+                          } else if (currentPage <= 3) {
+                            pageNum = i + 1;
+                          } else if (currentPage >= totalPages - 2) {
+                            pageNum = totalPages - 4 + i;
+                          } else {
+                            pageNum = currentPage - 2 + i;
+                          }
+                          return (
+                            <button
+                              key={pageNum}
+                              onClick={() => {
+                                if (trainerFilter === 'passes') {
+                                  setPastAppointmentsPage(pageNum);
+                                } else {
+                                  setTrainerCurrentPage(pageNum);
+                                }
+                              }}
+                              className={`px-3 py-2 rounded-lg border transition-colors ${
+                                currentPage === pageNum
+                                  ? "bg-pink-600 text-white border-pink-700"
+                                  : "bg-white hover:bg-pink-50 border-pink-300 text-pink-700"
+                              }`}
+                            >
+                              {pageNum}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <button
+                        onClick={() => {
+                          if (trainerFilter === 'passes') {
+                            const newPage = Math.min(totalPages, pastAppointmentsPage + 1);
+                            setPastAppointmentsPage(newPage);
+                          } else {
+                            setTrainerCurrentPage(prev => Math.min(totalPages, prev + 1));
+                          }
+                        }}
+                        disabled={trainerFilter === 'passes' ? pastAppointmentsPage === totalPages : trainerCurrentPage === totalPages}
+                        className={`px-3 py-2 rounded-lg border transition-colors ${
+                          (trainerFilter === 'passes' ? pastAppointmentsPage === totalPages : trainerCurrentPage === totalPages)
+                            ? "bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed"
+                            : "bg-white hover:bg-pink-50 border-pink-300 text-pink-700"
+                        }`}
+                      >
+                        <span className="material-symbols-rounded text-2xl">chevron_right</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
@@ -498,197 +1398,8 @@ const SLOT_MINUTES = 30;
 
   // (Chargement RDV patients retiré)
 
-  // Génère les 6 semaines affichées (42 cases), en commençant lundi
-  const calendarDays = React.useMemo(() => {
-    const year = currentMonth.getFullYear();
-    const month = currentMonth.getMonth();
-    const firstDay = new Date(year, month, 1);
-    const start = new Date(firstDay);
-    const offset = dayIndexMondayFirst(firstDay);
-    start.setDate(1 - offset);
-    const days = [];
-    const cursor = new Date(start);
-    for (let i = 0; i < 42; i++) {
-      days.push(new Date(cursor));
-      cursor.setDate(cursor.getDate() + 1);
-    }
-    return days;
-  }, [currentMonth]);
-
-  // Créneaux demi-heure
-  const timeSlots = React.useMemo(() => {
-    const slots = [];
-    for (let hour = HOURS_START; hour < HOURS_END; hour++) {
-      for (let minute = 0; minute < 60; minute += SLOT_MINUTES) {
-        const start = `${hour.toString().padStart(2, "0")}:${minute.toString().padStart(2, "0")}`;
-        const endMinutesTotal = hour * 60 + minute + SLOT_MINUTES;
-        const endH = Math.floor(endMinutesTotal / 60);
-        const endM = endMinutesTotal % 60;
-        const end = `${endH.toString().padStart(2, "0")}:${endM.toString().padStart(2, "0")}`;
-        slots.push({ start, end });
-      }
-    }
-    return slots;
-  }, []);
-
-  // Couleurs statut alignées avec la page complète
-  const getPlanningClasses = (statut) => {
-    switch (statut) {
-      case 'EN_ATTENTE': return { box: 'bg-yellow-50 border-l-4 border-l-yellow-500', badge: 'bg-yellow-100 text-yellow-800', border: 'border-l-yellow-500' };
-      case 'PLANIFIE': return { box: 'bg-blue-50 border-l-4 border-l-blue-500', badge: 'bg-blue-100 text-blue-800', border: 'border-l-blue-500' };
-      case 'CONFIRME': return { box: 'bg-green-50 border-l-4 border-l-green-500', badge: 'bg-green-100 text-green-800', border: 'border-l-green-500' };
-      case 'ANNULE': return { box: 'bg-red-50 border-l-4 border-l-red-500', badge: 'bg-red-100 text-red-800', border: 'border-l-red-500' };
-      case 'ABSENT': return { box: 'bg-red-100 border-l-4 border-l-red-600', badge: 'bg-red-600 text-white font-bold', border: 'border-l-red-600' };
-      case 'TERMINE': return { box: 'bg-gray-50 border-l-4 border-l-gray-500', badge: 'bg-gray-100 text-gray-800', border: 'border-l-gray-500' };
-      default: return { box: 'bg-blue-50 border-l-4 border-l-blue-500', badge: 'bg-blue-100 text-blue-800', border: 'border-l-blue-500' };
-    }
-  };
-
-  const getListBg = (statut) => {
-    // Utiliser les mêmes couleurs que getPlanningClasses pour la cohérence
-    switch (statut) {
-      case 'EN_ATTENTE': return 'bg-yellow-50';
-      case 'PLANIFIE': return 'bg-blue-50';
-      case 'CONFIRME': return 'bg-green-50';
-      case 'ANNULE': return 'bg-red-50';
-      case 'ABSENT': return 'bg-red-100';
-      case 'TERMINE': return 'bg-gray-50';
-      default: return 'bg-blue-50';
-    }
-  };
-  
-  // Fonction unifiée pour obtenir les classes de badge (cohérence avec le planning)
-  const getStatusBadgeClasses = (statut) => {
-    const cls = getPlanningClasses(statut);
-    return cls.badge;
-  };
-
-  // Récupération robuste du nom médecin pour affichage (plusieurs formats backend)
-  const getDoctorName = (appt) => {
-    if (!appt) return '';
-    // Métadonnées possibles
-    const metaName = appt?.payload?.metadata?.doctor_name || appt?.metadata?.doctor_name;
-    if (metaName && String(metaName).trim()) return String(metaName).trim();
-    // Chaînes directes
-    const direct = appt?.medecinName || appt?.doctorName || appt?.medecin_nom_complet || appt?.praticien || '';
-    if (direct && String(direct).trim()) return String(direct).trim();
-    // IRI vers cache local si nécessaire
-    const medecinField = appt?.medecin || appt?.doctor;
-    if (typeof medecinField === 'string') {
-      const iri = medecinField;
-      const id = iri.includes('/') ? iri.split('/').pop() : iri;
-      const inCache = medecinsById[id];
-      if (inCache) {
-        const fn = inCache.prenom || inCache.firstName || '';
-        const ln = inCache.nom || inCache.lastName || '';
-        const composed = `${fn} ${ln}`.trim();
-        if (composed) return composed;
-      }
-    }
-    // Objets usuels
-    const m = (typeof medecinField === 'object' && medecinField) ? medecinField : (appt?.medecin || appt?.doctor || {});
-    const prenom = m.prenom || m.firstName || m.givenName || appt?.medecin_prenom || '';
-    const nom = m.nom || m.lastName || m.familyName || appt?.medecin_nom || '';
-    const composed = `${prenom || ''} ${nom || ''}`.trim();
-    if (composed) return composed;
-    return '';
-  };
-
-  // RDV filtrés sur la journée sélectionnée
-  const dayAppointments = React.useMemo(() => {
-    const day = selectedDate;
-    return (appointments || [])
-      .filter(r => r?.statut !== 'ANNULE')
-      .filter(r => {
-        const d = new Date(r.startAt || r.start_at || r.appointmentTime || r.startTime || r.dateTime);
-        return !isNaN(d) && sameDay(d, day);
-      });
-  }, [appointments, selectedDate]);
-
-  // Indexation des RDV par créneau (HH:mm)
-  const appointmentsBySlot = React.useMemo(() => {
-    const map = new Map();
-    timeSlots.forEach(slot => map.set(slot.start, []));
-    for (const appt of dayAppointments) {
-      const dateFields = [appt.startAt, appt.start_at, appt.appointmentTime, appt.startTime, appt.dateTime];
-      let key = '';
-      for (const field of dateFields) {
-        if (!field) continue;
-        const hhmm = extractHHmm(field);
-        if (hhmm) { key = hhmm; break; }
-      }
-      if (key && map.has(key)) map.get(key).push(appt);
-    }
-    return map;
-  }, [dayAppointments, timeSlots]);
-
-  // Calcul des créneaux occupés par la durée (ex: 60min couvre 2 slots de 30min)
-  const getApptDurationMinutes = (appt) => {
-    // Priorités: champ direct, synonymes, calcul end-start, fallback 30
-    const direct = appt?.duree ?? appt?.duration ?? appt?.dureeMinutes ?? appt?.lengthMinutes;
-    if (typeof direct === 'number' && !isNaN(direct)) return direct;
-    if (typeof direct === 'string' && direct.trim() && !isNaN(parseInt(direct, 10))) return parseInt(direct, 10);
-    const start = appt?.startAt || appt?.start_at || appt?.appointmentTime || appt?.startTime || appt?.dateTime;
-    const end = appt?.endAt || appt?.end_at || appt?.endTime;
-    if (start && end) {
-      const ds = new Date(start);
-      const de = new Date(end);
-      if (!isNaN(ds) && !isNaN(de)) {
-        const mins = Math.max(0, Math.round((de.getTime() - ds.getTime()) / 60000));
-        if (mins > 0) return mins;
-      }
-    }
-    return 30;
-  };
-
-  const occupiedContinuationSlots = React.useMemo(() => {
-    const occupied = new Set();
-    const slotIndexByStart = new Map(timeSlots.map((s, idx) => [s.start, idx]));
-    for (const appt of dayAppointments) {
-      const dateFields = [appt.startAt, appt.start_at, appt.appointmentTime, appt.startTime, appt.dateTime];
-      let startKey = '';
-      for (const field of dateFields) {
-        if (!field) continue;
-        const hhmm = extractHHmm(field);
-        if (hhmm) { startKey = hhmm; break; }
-      }
-      if (!startKey) continue;
-      const startIdx = slotIndexByStart.get(startKey);
-      if (startIdx === undefined) continue;
-      const dureeMin = getApptDurationMinutes(appt);
-      const slotsToCover = Math.ceil(dureeMin / SLOT_MINUTES);
-      for (let i = 1; i < slotsToCover; i++) {
-        const idx = startIdx + i;
-        if (idx >= 0 && idx < timeSlots.length) {
-          occupied.add(timeSlots[idx].start);
-        }
-      }
-    }
-    return occupied;
-  }, [dayAppointments, timeSlots]);
-
-  const formatEndTimeFrom = (startHHmm, dureeMin) => {
-    if (!startHHmm) return '';
-    const [h, m] = startHHmm.split(":").map(n => parseInt(n, 10));
-    const startTotal = h * 60 + m;
-    const endTotal = startTotal + (parseInt(dureeMin || 30, 10));
-    const endH = Math.floor(endTotal / 60);
-    const endM = endTotal % 60;
-    return `${endH.toString().padStart(2, '0')}:${endM.toString().padStart(2, '0')}`;
-  };
-
-  const formatRangeForAppointment = (appt) => {
-    const startRaw = appt?.startAt || appt?.start_at || appt?.appointmentTime || appt?.startTime || appt?.dateTime;
-    const startHHmm = extractHHmm(startRaw);
-    if (!startHHmm) return '';
-    const endRaw = appt?.endAt || appt?.end_at || appt?.endTime;
-    let endHHmm = extractHHmm(endRaw);
-    if (!endHHmm) {
-      const dmin = getApptDurationMinutes(appt);
-      endHHmm = formatEndTimeFrom(startHHmm, dmin);
-    }
-    return `${startHHmm} à ${endHHmm}`;
-  };
+  // Utiliser l'utilitaire centralisé
+  const formatRangeForAppointment = (appt) => formatAppointmentTimeRange(appt);
 
 
   const goToPreviousMonth = () => setCurrentMonth(m => new Date(m.getFullYear(), m.getMonth() - 1, 1));
@@ -748,10 +1459,6 @@ const SLOT_MINUTES = 30;
       setLoading(false);
     }
   };
-
-  // Edition de statut (corriger une erreur)
-  const [editStatusId, setEditStatusId] = useState(null);
-  const [editStatusValue, setEditStatusValue] = useState('');
 
   // util: format ISO local without timezone: YYYY-MM-DDTHH:mm:ss
   const formatDateTimeForApi = (d) => {
@@ -846,13 +1553,13 @@ const SLOT_MINUTES = 30;
         motif: newAppt.motif,
         statut: 'PLANIFIE',
         duree: parseInt(newAppt.duree || '30'), // compatible avec "duree"
-        notes: newAppt.notes,
+        notes: newAppt.urgenceMedecin 
+          ? (newAppt.notes ? `${newAppt.notes} [URGENCE_MEDECIN]` : '[URGENCE_MEDECIN]')
+          : newAppt.notes,
       };
-      console.debug('[RDV] CREATE payload=', payload);
       await appointmentService.createAppointment(payload);
-      console.debug('[RDV] CREATE ok');
       setShowCreate(false);
-      setNewAppt({ patient: '', medecin: '', motif: '', date: '', heure: '', duree: '30', notes: '' });
+      setNewAppt({ patient: '', medecin: '', motif: '', date: '', heure: '', duree: '30', notes: '', urgenceMedecin: false });
       await loadAppointments();
     } catch (e) {
       const raw = e?.response?.data;
@@ -910,6 +1617,8 @@ const SLOT_MINUTES = 30;
     const d = start ? new Date(start) : null;
     const date = d && !isNaN(d) ? d.toISOString().split('T')[0] : '';
     const heure = d && !isNaN(d) ? `${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}` : '';
+    const notes = appt?.notes || '';
+    const cleanNotes = notes.replace(/\[URGENCE_MEDECIN\]/g, '').trim();
     setEditAppt({
       patient: appt?.patient?.id || '',
       medecin: appt?.medecin?.id || appt?.doctor?.id || '',
@@ -917,7 +1626,8 @@ const SLOT_MINUTES = 30;
       date,
       heure,
       duree: String(getApptDurationMinutes(appt)),
-      notes: appt?.notes || ''
+      notes: cleanNotes,
+      urgenceMedecin: hasUrgenceMedecin(appt)
     });
     setEditApptId(appt.id);
     setEditError('');
@@ -946,6 +1656,22 @@ const SLOT_MINUTES = 30;
         return;
       }
 
+      // Champs requis
+      if (!editAppt.patient) {
+        setEditError('Le patient est requis');
+        setLoading(false);
+        return;
+      }
+      const selectedPatient = patients.find(p => getPatientId(p) === String(editAppt.patient));
+      if (selectedPatient) {
+        const info = getPatientStatusInfo(selectedPatient);
+        if (info.isDeceased) {
+          setEditError('Ce patient est déclaré décédé. Impossible de modifier le rendez-vous.');
+          setLoading(false);
+          return;
+        }
+      }
+
       // Vérification de conflit avant édition
       try {
         const { conflict } = await appointmentService.verifyConflict({
@@ -968,11 +1694,17 @@ const SLOT_MINUTES = 30;
         end_at: endStr,
         motif: editAppt.motif,
         duree: parseInt(editAppt.duree || '30'),
-        notes: editAppt.notes,
+        notes: (() => {
+          // Retirer le tag [URGENCE_MEDECIN] s'il existe
+          let cleanNotes = (editAppt.notes || '').replace(/\[URGENCE_MEDECIN\]/g, '').trim();
+          // Ajouter le tag si la checkbox est cochée
+          if (editAppt.urgenceMedecin) {
+            cleanNotes = cleanNotes ? `${cleanNotes} [URGENCE_MEDECIN]` : '[URGENCE_MEDECIN]';
+          }
+          return cleanNotes;
+        })(),
       };
-      console.debug('[RDV] EDIT payload=', payload);
       await appointmentService.updateAppointment(editApptId, payload);
-      console.debug('[RDV] EDIT ok');
       setShowEdit(false);
       await loadAppointments();
     } catch (e) {
@@ -1038,14 +1770,16 @@ const SLOT_MINUTES = 30;
   ];
 
   return (
-    <div className="min-h-screen p-6">
+    <div className="min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6">
       
       {/* Titre centré avec icône et description */}
       <div className="text-center py-6 mb-6">
         <div className="bg-pink-200 rounded-lg shadow p-6 max-w-xl mx-auto">
           <div className="flex items-center justify-center gap-3 mb-2">
-            <div className="w-12 h-12 bg-pink-100 rounded-full flex items-center justify-center shadow-sm">
-              <span className="material-symbols-rounded text-pink-600 text-2xl">calendar_month</span>
+            <div className="w-16 h-16 bg-pink-100 rounded-full flex items-center justify-center shadow-sm">
+              <svg className="w-8 h-8 text-pink-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
             </div>
             <h1 className="text-2xl font-bold text-pink-800">Rendez-Vous</h1>
           </div>
@@ -1058,52 +1792,30 @@ const SLOT_MINUTES = 30;
 
         {/* Stats (même visuel que la page complète) */}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-6">
-        <div className="bg-pink-50 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-pink-700">Total aujourd'hui</p>
-                <p className="text-3xl font-bold text-pink-800">{stats.total}</p>
-            </div>
-              <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
-                <span className="material-symbols-rounded text-blue-600">event</span>
-              </div>
-          </div>
-        </div>
-
-        <div className="bg-pink-50 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-pink-700">Planifiés</p>
-              <p className="text-3xl font-bold text-pink-800">{stats.planifies}</p>
-            </div>
-              <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center">
-                <span className="material-symbols-rounded text-blue-600">event_upcoming</span>
-              </div>
-          </div>
-        </div>
-        <div className="bg-pink-50 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-pink-700">Confirmés</p>
-              <p className="text-3xl font-bold text-pink-800">{stats.confirmes}</p>
-            </div>
-              <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
-                <span className="material-symbols-rounded text-green-600">check_circle</span>
-              </div>
-          </div>
-        </div>
-        
-        <div className="bg-pink-50 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-pink-700">Absents</p>
-              <p className="text-3xl font-bold text-red-600">{stats.absents}</p>
-            </div>
-              <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
-                <span className="material-symbols-rounded text-red-600">person_off</span>
-              </div>
-          </div>
-        </div>
+          <StatCard
+            icon="calendar"
+            label="Total aujourd'hui"
+            value={stats.total}
+            color="blue"
+          />
+          <StatCard
+            icon="clock"
+            label="Planifiés"
+            value={stats.planifies}
+            color="blue"
+          />
+          <StatCard
+            icon="check"
+            label="Confirmés"
+            value={stats.confirmes}
+            color="green"
+          />
+          <StatCard
+            icon="users"
+            label="Absents"
+            value={stats.absents}
+            color="red"
+          />
       </div>
 
       {/* Bouton de sélection médecin centré entre stats et calendrier */}
@@ -1112,14 +1824,14 @@ const SLOT_MINUTES = 30;
           <button
             type="button"
             onClick={() => setShowDoctorPicker(v => !v)}
-            className="inline-flex flex-col items-center gap-1 px-4 py-2 rounded-full bg-pink-600 text-white text-base font-bold hover:bg-pink-700 shadow text-center"
+            className="inline-flex flex-col items-center gap-1 px-4 py-2 rounded-full bg-pink-600 text-white text-2xl font-bold hover:bg-pink-700 shadow text-center"
           >
             <span className="inline-flex items-center gap-2">
               <span className="material-symbols-rounded text-sm">stethoscope</span>
               {selectedMedecinId ? 'Changer de médecin' : 'Choisir le médecin'}
             </span>
             {selectedMedecinId && (
-              <span className="block text-sm md:text-base font-bold opacity-95 leading-tight">
+              <span className="block text-sm md:text-2xl font-bold opacity-95 leading-tight">
                 {(() => {
                   const m = medecins.find(x => x.id === selectedMedecinId);
                   if (!m) return '';
@@ -1151,7 +1863,7 @@ const SLOT_MINUTES = 30;
           {/* Calendrier réduit (médecin sélectionné) */}
           <div className="bg-white rounded-lg shadow p-6 mb-6">
             <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-xl font-bold text-pink-800 flex items-center gap-2 m-0">
+              <h3 className="text-2xl font-bold text-pink-800 flex items-center gap-2 m-0">
                 <span className="material-symbols-rounded text-pink-600">calendar_month</span>
                 Calendrier
               </h3>
@@ -1161,7 +1873,7 @@ const SLOT_MINUTES = 30;
               <button onClick={goToPreviousMonth} className="p-2 hover:bg-pink-100 rounded-lg transition-colors text-pink-700">
                 <span className="material-symbols-rounded">chevron_left</span>
               </button>
-              <h4 className="text-lg font-semibold text-pink-700">
+              <h4 className="text-2xl font-semibold text-pink-700">
                 {currentMonth.toLocaleDateString("fr-FR", { month: "long", year: "numeric" })}
               </h4>
               <button onClick={goToNextMonth} className="p-2 hover:bg-pink-100 rounded-lg transition-colors text-pink-700">
@@ -1196,7 +1908,7 @@ const SLOT_MINUTES = 30;
           {/* Planning de la journée (agenda) */}
           <div className="bg-pink-200 rounded-lg shadow">
             <div className="p-6 border-b-2 border-pink-300 bg-pink-50">
-              <h3 className="text-lg font-semibold text-pink-800 flex items-center gap-2">
+              <h3 className="text-2xl font-semibold text-pink-800 flex items-center gap-2">
                 <svg className="w-5 h-5 text-pink-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
@@ -1226,16 +1938,35 @@ const SLOT_MINUTES = 30;
                     if (isContinuation) return null; // fusion: ne pas afficher les suites
                     const dureeMin = getApptDurationMinutes(first);
                     const slotsToCover = hasStarter ? Math.ceil(dureeMin / SLOT_MINUTES) : 1;
+                    // Vérifier si le créneau est entre 12h et 14h
+                    const slotHour = parseInt(slot.start.split(":")[0], 10);
+                    const isUrgencySlot = slotHour >= 12 && slotHour < 14;
                     return (
-                      <div key={slot.start} style={{ minHeight: HAUTEUR_MIN_CARTE_CRENEAU * slotsToCover }} className={`border border-pink-200 rounded-lg p-3 bg-white transition-all shadow-sm ${hasStarter ? 'hover:bg-pink-50' : 'cursor-pointer hover:bg-pink-100 hover:shadow-md hover:border-pink-300 hover:scale-[1.02]'}`}>
-                        <div className="text-sm font-medium text-pink-700 mb-2 font-semibold">{slot.start} - {hasStarter ? formatEndTimeFrom(slot.start, dureeMin) : slot.end}</div>
+                      <div key={slot.start} style={{ minHeight: HAUTEUR_MIN_CARTE_CRENEAU * slotsToCover }} className={`border rounded-lg p-3 transition-all shadow-sm ${
+                        isUrgencySlot 
+                          ? 'border-gray-300 bg-gray-100 opacity-75' 
+                          : `border-pink-200 bg-white ${hasStarter ? 'hover:bg-pink-50' : 'cursor-pointer hover:bg-pink-100 hover:shadow-md hover:border-pink-300 hover:scale-[1.02]'}`
+                      }`}>
+                        <div className={`text-sm font-medium mb-2 font-semibold ${isUrgencySlot ? 'text-gray-600' : 'text-pink-700'}`}>
+                          {slot.start} - {hasStarter ? formatEndTimeFrom(slot.start, dureeMin) : slot.end}
+                        </div>
+                        {isUrgencySlot && !hasStarter && (
+                          <div className="text-xs text-gray-500 italic mb-2">
+                            Créneaux d'urgence privilégiés pour le médecin
+                          </div>
+                        )}
                         <div>
                           {hasStarter ? (() => {
                             const cls = getPlanningClasses(first?.statut);
                             return (
                               <div className={`${cls.box} p-3 rounded-lg`}>
                                 <div className="text-xs">
-                                  <div className="font-semibold">{first?.patient?.prenom} {first?.patient?.nom}</div>
+                                  <div className="font-semibold flex items-center gap-1">
+                                    <PatientName patient={first?.patient} />
+                                    {hasUrgenceMedecin(first) && (
+                                      <span className="material-symbols-rounded text-red-600 text-2xl" title="Urgence médecin">emergency</span>
+                                    )}
+                                  </div>
                                   <div className="text-gray-600 mt-1">{first?.motif}</div>
                                   <div className="mt-2 flex items-center gap-2"><span className={`px-2 py-1 rounded text-xs font-medium ${cls.badge}`}>{first?.statut}</span>
                                     <button onClick={() => openEdit(first)} className="px-2 py-0.5 rounded bg-pink-600 text-white hover:bg-pink-700 text-xs">Modifier</button>
@@ -1250,14 +1981,18 @@ const SLOT_MINUTES = 30;
                             </div>
                           ) : (
                             <div className="flex items-center justify-end gap-2">
-                              <span className="text-xs text-pink-600">Libre</span>
-                              <button onClick={() => {
+                              <span className={`text-xs ${isUrgencySlot ? 'text-gray-500' : 'text-pink-600'}`}>Libre</span>
+                              <button 
+                                onClick={() => {
                                 const y = selectedDate.getFullYear();
                                 const m = String(selectedDate.getMonth() + 1).padStart(2, '0');
                                 const d = String(selectedDate.getDate()).padStart(2, '0');
                                 setNewAppt(a => ({ ...a, date: `${y}-${m}-${d}`, heure: slot.start }));
                                 setShowCreate(true);
-                              }} className="text-pink-600 hover:text-pink-800 hover:bg-pink-100 rounded-full p-1 transition-all" title="Ajouter un RDV">
+                                }} 
+                                className="text-pink-600 hover:text-pink-800 hover:bg-pink-100 rounded-full p-1 transition-all" 
+                                title="Ajouter un RDV"
+                              >
                                 <span className="material-symbols-rounded">add</span>
                               </button>
                             </div>
@@ -1277,16 +2012,35 @@ const SLOT_MINUTES = 30;
                     if (isContinuation) return null; // fusion: ne pas afficher les suites
                     const dureeMin = getApptDurationMinutes(first);
                     const slotsToCover = hasStarter ? Math.ceil(dureeMin / SLOT_MINUTES) : 1;
+                    // Vérifier si le créneau est entre 12h et 14h
+                    const slotHour = parseInt(slot.start.split(":")[0], 10);
+                    const isUrgencySlot = slotHour >= 12 && slotHour < 14;
                     return (
-                      <div key={slot.start} style={{ minHeight: HAUTEUR_MIN_CARTE_CRENEAU * slotsToCover }} className={`border border-pink-200 rounded-lg p-3 bg-white transition-all shadow-sm ${hasStarter ? 'hover:bg-pink-50' : 'cursor-pointer hover:bg-pink-100 hover:shadow-md hover:border-pink-300 hover:scale-[1.02]'}`}>
-                        <div className="text-sm font-medium text-pink-700 mb-2 font-semibold">{slot.start} - {hasStarter ? formatEndTimeFrom(slot.start, dureeMin) : slot.end}</div>
+                      <div key={slot.start} style={{ minHeight: HAUTEUR_MIN_CARTE_CRENEAU * slotsToCover }} className={`border rounded-lg p-3 transition-all shadow-sm ${
+                        isUrgencySlot 
+                          ? 'border-gray-300 bg-gray-100 opacity-75' 
+                          : `border-pink-200 bg-white ${hasStarter ? 'hover:bg-pink-50' : 'cursor-pointer hover:bg-pink-100 hover:shadow-md hover:border-pink-300 hover:scale-[1.02]'}`
+                      }`}>
+                        <div className={`text-sm font-medium mb-2 font-semibold ${isUrgencySlot ? 'text-gray-600' : 'text-pink-700'}`}>
+                          {slot.start} - {hasStarter ? formatEndTimeFrom(slot.start, dureeMin) : slot.end}
+                        </div>
+                        {isUrgencySlot && !hasStarter && (
+                          <div className="text-xs text-gray-500 italic mb-2">
+                            Créneaux d'urgence privilégiés pour le médecin
+                          </div>
+                        )}
                         <div>
                           {hasStarter ? (() => {
                             const cls = getPlanningClasses(first?.statut);
                             return (
                               <div className={`${cls.box} p-3 rounded-lg`}>
                                 <div className="text-xs">
-                                  <div className="font-semibold">{first?.patient?.prenom} {first?.patient?.nom}</div>
+                                  <div className="font-semibold flex items-center gap-1">
+                                    <PatientName patient={first?.patient} />
+                                    {hasUrgenceMedecin(first) && (
+                                      <span className="material-symbols-rounded text-red-600 text-2xl" title="Urgence médecin">emergency</span>
+                                    )}
+                                  </div>
                                   <div className="text-gray-600 mt-1">{first?.motif}</div>
                                   <div className="mt-2 flex items-center gap-2"><span className={`px-2 py-1 rounded text-xs font-medium ${cls.badge}`}>{first?.statut}</span>
                                     <button onClick={() => openEdit(first)} className="px-2 py-0.5 rounded bg-pink-600 text-white hover:bg-pink-700 text-xs">Modifier</button>
@@ -1300,14 +2054,18 @@ const SLOT_MINUTES = 30;
                             </div>
                           ) : (
                             <div className="flex items-center justify-end gap-2">
-                              <span className="text-xs text-pink-600">Libre</span>
-                              <button onClick={() => {
+                              <span className={`text-xs ${isUrgencySlot ? 'text-gray-500' : 'text-pink-600'}`}>Libre</span>
+                              <button 
+                                onClick={() => {
                                 const y = selectedDate.getFullYear();
                                 const m = String(selectedDate.getMonth() + 1).padStart(2, '0');
                                 const d = String(selectedDate.getDate()).padStart(2, '0');
                                 setNewAppt(a => ({ ...a, date: `${y}-${m}-${d}`, heure: slot.start }));
                                 setShowCreate(true);
-                              }} className="text-pink-600 hover:text-pink-800 hover:bg-pink-100 rounded-full p-1 transition-all" title="Ajouter un RDV">
+                                }} 
+                                className="text-pink-600 hover:text-pink-800 hover:bg-pink-100 rounded-full p-1 transition-all" 
+                                title="Ajouter un RDV"
+                              >
                                 <span className="material-symbols-rounded">add</span>
                               </button>
                             </div>
@@ -1332,47 +2090,10 @@ const SLOT_MINUTES = 30;
       {/* Liste des rendez-vous avec entête identique à la page complète */}
       <div className="bg-pink-200 rounded-lg shadow mt-6">
         <div className="px-6 py-4 border-b-2 border-pink-300 bg-pink-50 flex items-center justify-between gap-3 flex-wrap">
-          <h3 className="text-lg font-semibold text-pink-800 flex items-center gap-2 m-0">
+          <h3 className="text-2xl font-semibold text-pink-800 flex items-center gap-2 m-0">
             <span className="material-symbols-rounded text-pink-600">list</span>
             Liste des rendez-vous
           </h3>
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                loadAppointments();
-                setError(null);
-              }}
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
-              title="Rafraîchir la liste des rendez-vous"
-            >
-              <span className="material-symbols-rounded text-base">refresh</span>
-              Rafraîchir
-            </button>
-            {!isFormateur && (
-              <button
-                onClick={() => {
-                  const useHistory = filters.useHistoryEndpoint === true;
-                  setFilters(prev => ({
-                    ...prev,
-                    useHistoryEndpoint: !useHistory,
-                    skipAutoFilter: !useHistory,
-                    page: 1
-                  }));
-                }}
-                className={`px-4 py-2 rounded-lg transition-colors flex items-center gap-2 ${
-                  filters.useHistoryEndpoint 
-                    ? 'bg-green-600 text-white hover:bg-green-700' 
-                    : 'bg-gray-600 text-white hover:bg-gray-700'
-                }`}
-                title={filters.useHistoryEndpoint ? "Voir mes rendez-vous uniquement" : "Voir tous les rendez-vous"}
-              >
-                <span className="material-symbols-rounded text-base">
-                  {filters.useHistoryEndpoint ? 'person' : 'people'}
-                </span>
-                {filters.useHistoryEndpoint ? 'Mes rendez-vous' : 'Tous les rendez-vous'}
-              </button>
-            )}
-          </div>
         </div>
         <div className="px-6 py-2 bg-pink-100 border-b border-pink-200">
           {/* Avertissement si un filtre de date limite l'affichage */}
@@ -1381,7 +2102,7 @@ const SLOT_MINUTES = 30;
               <div className="flex items-start gap-3 flex-1">
                 <span className="material-symbols-rounded text-yellow-600 text-2xl">warning</span>
                 <div className="flex-1">
-                  <p className="text-base font-bold text-yellow-900 mb-2">
+                  <p className="text-2xl font-bold text-yellow-900 mb-2">
                     ⚠️ Filtre de date actif - Affichage limité
                   </p>
                   <p className="text-sm text-yellow-800 mb-2">
@@ -1407,7 +2128,7 @@ const SLOT_MINUTES = 30;
                 className="text-yellow-700 hover:text-yellow-900 hover:bg-yellow-100 rounded-full p-2 transition-colors ml-2"
                 title="Retirer le filtre de date pour voir tous les rendez-vous"
               >
-                <span className="material-symbols-rounded text-xl">close</span>
+                <span className="material-symbols-rounded text-2xl">close</span>
               </button>
             </div>
           )}
@@ -1427,13 +2148,13 @@ const SLOT_MINUTES = 30;
               {selectedMedecinId && (
                 <span className="text-sm text-pink-700">
                   Filtré par médecin : {(() => {
-                    const m = medecins.find(x => x.id === selectedMedecinId);
+              const m = medecins.find(x => x.id === selectedMedecinId);
                     if (!m) return '';
-                    const lastUpper = (m.nom || '').toUpperCase();
-                    const first = m.prenom || '';
-                    const spec = m?.specialite?.label || m?.specialite?.nom || m?.specialite || m?.specialty?.name || m?.specialty || '';
+              const lastUpper = (m.nom || '').toUpperCase();
+              const first = m.prenom || '';
+              const spec = m?.specialite?.label || m?.specialite?.nom || m?.specialite || m?.specialty?.name || m?.specialty || '';
                     return `Dr ${lastUpper} ${first}${spec ? ' — ' + spec : ''}`.trim();
-                  })()}
+            })()}
                 </span>
               )}
             </div>
@@ -1631,25 +2352,25 @@ const SLOT_MINUTES = 30;
               )}
             </div>
             {/* Filtres Patient/Médecin */}
-            <select 
-              value={filters.patientId || ''} 
-              onChange={(e) => setFilters(f => ({ 
-                ...f, 
-                patientId: e.target.value || undefined,
-                page: 1
-              }))} 
-              className="px-3 py-1 text-xs border border-pink-300 rounded"
-            >
-              <option value="">Tous les patients</option>
-              {patients.map(p => (
-                <option key={p.id} value={p.id}>{p.prenom} {p.nom}</option>
-              ))}
-            </select>
+            <div className="min-w-[200px]">
+              <PatientSearchInput
+                patients={patients}
+                value={filters.patientId || ''}
+                onChange={(patientId) => setFilters(f => ({ 
+                  ...f, 
+                  patientId: patientId || undefined,
+                  page: 1
+                }))}
+                placeholder="Tous les patients"
+                className="text-xs"
+                label=""
+              />
+            </div>
 
           {loading && (
               <div className="flex items-center text-sm text-gray-500 ml-2">
-              <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-pink-500 mr-2"></div>
-              Chargement...
+              <LoadingSpinner color="pink" size="small" inline={true} />
+              <span className="ml-2">Chargement...</span>
             </div>
           )}
           </div>
@@ -1666,10 +2387,7 @@ const SLOT_MINUTES = 30;
           </div>
         )}
         {loading ? (
-          <div className="text-center py-8">
-            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-pink-500 mx-auto"></div>
-            <p className="mt-2 text-gray-600">Chargement des rendez-vous...</p>
-            </div>
+          <LoadingSpinner color="pink" message="Chargement des rendez-vous..." />
         ) : appointments.length === 0 ? (
             <div className="text-center py-8 text-gray-500">
               {selectedMedecinId ? 'Aucun rendez-vous trouvé pour ce médecin' : 'Aucun rendez-vous trouvé'}
@@ -1678,7 +2396,33 @@ const SLOT_MINUTES = 30;
             <div className="space-y-4">
             {(() => {
               // Filtrer les rendez-vous
-              const filteredAppointments = appointments.filter(a => {
+              // Pour les stagiaires : s'assurer qu'on ne montre que leurs propres créations
+              let appointmentsToFilter = appointments;
+              if (!isFormateur && !isAdmin && currentUserId && currentUserIri) {
+                appointmentsToFilter = appointments.filter(appt => {
+                  const creator = appt.createdBy || appt.created_by || appt.creePar || appt.user || null;
+                  if (!creator) return false;
+                  
+                  if (typeof creator === 'object') {
+                    const creatorId = creator.id;
+                    const creatorIri = creator['@id'] || (creatorId ? `/api/users/${creatorId}` : null);
+                    return String(creatorId) === String(currentUserId) || creatorIri === currentUserIri;
+                  }
+                  
+                  if (typeof creator === 'string') {
+                    const creatorId = creator.includes('/') ? creator.split('/').pop() : creator;
+                    return String(creatorId) === String(currentUserId) || creator === currentUserIri;
+                  }
+                  
+                  if (typeof creator === 'number') {
+                    return String(creator) === String(currentUserId);
+                  }
+                  
+                  return false;
+                });
+              }
+              
+              const filteredAppointments = appointmentsToFilter.filter(a => {
                 // Exclure les annulés de l'affichage par défaut (mais ils peuvent être inclus via filtre statut)
                 // Si les annulés sont explicitement demandés via le filtre statut, on les inclut
                 if (a?.statut === 'ANNULE' && (!filters.statut || filters.statut.length === 0 || !filters.statut.includes('ANNULE'))) {
@@ -1707,11 +2451,14 @@ const SLOT_MINUTES = 30;
                       <div className="flex-1">
                         <div className="flex items-center space-x-4">
                           <div className={`w-12 h-12 ${cls.badge} rounded-full flex items-center justify-center`}>
-                          <span className={`font-semibold text-lg`}>{initials}</span>
+                          <span className={`font-semibold text-2xl`}>{initials}</span>
                           </div>
                           <div>
-                            <div className="font-semibold text-gray-800">
-                              {patient.prenom} {patient.nom}
+                            <div className="font-semibold text-gray-800 flex items-center gap-1">
+                              <PatientName patient={patient} />
+                              {hasUrgenceMedecin(appointment) && (
+                                <span className="material-symbols-rounded text-red-600 text-2xl" title="Urgence médecin">emergency</span>
+                              )}
                             </div>
                             <div className="text-sm text-gray-600">
                               {appointment.motif} • {getDoctorName(appointment)} • {d.toLocaleDateString('fr-FR')} • {formatRangeForAppointment(appointment)}
@@ -1759,6 +2506,17 @@ const SLOT_MINUTES = 30;
                           <button onClick={() => handleAction(appointment.id, 'CONFIRME')} className="px-3 py-1 rounded bg-green-600 text-white text-xs hover:bg-green-700">Confirmer</button>
                           <button onClick={() => handleAction(appointment.id, 'ABSENT')} className="px-3 py-1 rounded bg-red-600 text-white text-xs hover:bg-red-700 font-semibold">Absent</button>
                           <button onClick={() => handleAction(appointment.id, 'ANNULE')} className="px-3 py-1 rounded bg-red-600 text-white text-xs hover:bg-red-700">Annuler</button>
+                          {(isFormateur || isAdmin) && (
+                            <button 
+                              onClick={() => handleDeleteAppointment(appointment.id)} 
+                              disabled={isDeleting}
+                              className="px-3 py-1 rounded bg-red-800 text-white text-xs hover:bg-red-900 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-1"
+                              title="Supprimer ce rendez-vous"
+                            >
+                              <span className="material-symbols-rounded text-xs">delete</span>
+                              Supprimer
+                            </button>
+                          )}
                   </div>
                       )}
                       {appointment.statut !== 'PLANIFIE' && (
@@ -1777,6 +2535,17 @@ const SLOT_MINUTES = 30;
                               >
                                 Modifier
                               </button>
+                              {canDeleteAppointment(appointment) && (
+                                <button 
+                                  onClick={() => handleDeleteAppointment(appointment.id)} 
+                                  disabled={isDeleting}
+                                  className="px-3 py-1 rounded bg-red-800 text-white text-xs hover:bg-red-900 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-1"
+                                  title="Supprimer ce rendez-vous"
+                                >
+                                  <span className="material-symbols-rounded text-xs">delete</span>
+                                  Supprimer
+                                </button>
+                              )}
                           
                           {editStatusId === appointment.id && (
                                 <div className="flex items-center gap-2">
@@ -1825,7 +2594,7 @@ const SLOT_MINUTES = 30;
       {isFormateur && (
         <div className="bg-pink-200 rounded-lg shadow mt-6">
           <div className="px-6 py-4 border-b-2 border-pink-300 bg-pink-50 flex items-center justify-between gap-3 flex-wrap">
-            <h3 className="text-lg font-semibold text-pink-800 flex items-center gap-2 m-0">
+            <h3 className="text-2xl font-semibold text-pink-800 flex items-center gap-2 m-0">
               <span className="material-symbols-rounded text-pink-600">assignment_ind</span>
               RDV créés par des stagiaires
               <span className="ml-2 inline-flex items-center px-2 py-0.5 text-xs rounded-full bg-pink-100 text-pink-800 border border-pink-300">{trainerAppointments.length}</span>
@@ -1837,17 +2606,17 @@ const SLOT_MINUTES = 30;
             ) : trainerAppointments.length === 0 ? (
               <div className="text-center py-6 text-gray-500">Aucun rendez-vous créé par des stagiaires</div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-full">
+              <div className="w-full overflow-x-auto">
+                <table className="w-full table-auto">
                   <thead className="bg-pink-100">
                     <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Date</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Heure</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Patient</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Médecin</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Motif</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Statut</th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-pink-700 uppercase tracking-wider">Créé par</th>
+                      <th className="px-4 py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider w-24">Date</th>
+                      <th className="px-4 py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider w-20">Heure</th>
+                      <th className="px-4 py-3 text-center text-xs font-bold text-pink-700 uppercase tracking-wider">Patient</th>
+                      <th className="px-4 py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider">Médecin</th>
+                      <th className="px-4 py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider">Motif</th>
+                      <th className="px-4 py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider w-28">Statut</th>
+                      <th className="px-4 py-3 text-center text-xs font-medium text-pink-700 uppercase tracking-wider">Créé par</th>
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-pink-200">
@@ -1856,8 +2625,9 @@ const SLOT_MINUTES = 30;
                       const dateStr = !isNaN(d) ? d.toLocaleDateString('fr-FR') : '—';
                       const timeStr = !isNaN(d) ? d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) : '—';
                       const patient = rdv.patient || {};
-                      const medecin = rdv.medecin || rdv.doctor || {};
                       const statut = rdv.statut || rdv.status || 'PLANIFIE';
+                      // Utiliser la fonction centralisée pour obtenir le nom du médecin
+                      const doctorName = getDoctorNameFromAppointment(rdv, medecinsById) || '—';
                       const creatorRaw = rdv.createdBy || rdv.created_by || rdv.creePar || rdv.user || null;
                       let creatorName = '—';
                       if (creatorRaw) {
@@ -1875,13 +2645,24 @@ const SLOT_MINUTES = 30;
                       }
                       return (
                         <tr key={rdv.id || index} className="hover:bg-pink-50">
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{dateStr}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{timeStr}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{patient.prenom || ''} {patient.nom || ''}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{medecin.prenom || ''} {medecin.nom || ''}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{rdv.motif || '—'}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{statut}</td>
-                          <td className="px-6 py-3 whitespace-nowrap text-sm text-gray-900">{creatorName}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 whitespace-nowrap text-sm text-gray-900 text-center`}>{dateStr}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 whitespace-nowrap text-sm text-gray-900 text-center`}>{timeStr}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-sm text-gray-900 text-center break-words`}>
+                            {(() => {
+                              const genre = formatGenre(patient);
+                              return (
+                                <>
+                                  {genre && <span className="font-bold">{genre} </span>}
+                                  <span className="font-bold">{patient.nom || ''}</span>
+                                  {patient.prenom && <span> {patient.prenom}</span>}
+                                </>
+                              );
+                            })()}
+                          </td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-sm text-gray-900 text-center break-words`}>{doctorName}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-sm text-gray-900 text-center break-words`}>{rdv.motif || '—'}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 whitespace-nowrap text-sm text-gray-900 text-center`}>{statut}</td>
+                          <td className={`${isFormateur ? 'px-3' : 'px-4'} py-3 text-sm text-gray-900 text-center break-words`}>{creatorName}</td>
                         </tr>
                       );
                     })}
@@ -1913,7 +2694,7 @@ const SLOT_MINUTES = 30;
                               : "bg-white hover:bg-pink-50 border-pink-300 text-pink-700"
                           }`}
                         >
-                          <span className="material-symbols-rounded text-base">chevron_left</span>
+                          <span className="material-symbols-rounded text-2xl">chevron_left</span>
                         </button>
                         <div className="flex items-center gap-1">
                           {Array.from({ length: Math.min(5, totalPages) }, (_, i) => {
@@ -1952,7 +2733,7 @@ const SLOT_MINUTES = 30;
                               : "bg-white hover:bg-pink-50 border-pink-300 text-pink-700"
                           }`}
                         >
-                          <span className="material-symbols-rounded text-base">chevron_right</span>
+                          <span className="material-symbols-rounded text-2xl">chevron_right</span>
                         </button>
                       </div>
                     </div>
@@ -1972,7 +2753,7 @@ const SLOT_MINUTES = 30;
             <div className="px-6 py-4 border-b-2 border-pink-200 bg-pink-50 rounded-t-xl flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className="material-symbols-rounded text-pink-600">event_available</span>
-                <h3 className="text-lg font-semibold text-pink-800">Nouveau Rendez-vous</h3>
+                <h3 className="text-2xl font-semibold text-pink-800">Nouveau Rendez-vous</h3>
               </div>
               <button onClick={() => setShowCreate(false)} className="text-pink-500 hover:text-pink-700 rounded-full p-1 hover:bg-pink-100" aria-label="Fermer">
                 <span className="material-symbols-rounded">close</span>
@@ -1982,23 +2763,78 @@ const SLOT_MINUTES = 30;
               {createError && (
                 <div className="bg-red-100 border border-red-300 text-red-800 px-4 py-2 rounded">{createError}</div>
               )}
-              <div>
+              <div className="relative patient-search-create">
                 <label className="block text-sm font-medium text-pink-800 mb-1">Patient</label>
-                <select value={newAppt.patient} onChange={(e) => setNewAppt(a => ({ ...a, patient: e.target.value }))} className="w-full border border-pink-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-pink-400 bg-pink-50">
-                  <option value="">— Sélectionner —</option>
-                  {patients.map(p => {
-                    const id = getPatientId(p);
-                    if (!id) return null;
-                    const info = getPatientStatusInfo(p);
-                    const name = `${p.prenom || p.firstName || ''} ${p.nom || p.lastName || ''}`.trim() || (p.email || `Patient ${id}`);
-                    const statusSuffix = info.label ? ` — ${info.label}${info.icon ? ` ${info.icon}` : ''}` : '';
-                    return (
-                      <option key={id} value={id} disabled={info.isDeceased}>
-                        {name}{statusSuffix}{info.isDeceased ? ' (bloqué)' : ''}
-                      </option>
-                    );
-                  })}
-                </select>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={patientSearchCreate}
+                    onChange={(e) => {
+                      setPatientSearchCreate(e.target.value);
+                      setShowPatientResultsCreate(true);
+                      if (!e.target.value) {
+                        setNewAppt(prev => ({ ...prev, patient: '' }));
+                        setSelectedPatientCreate(null);
+                      }
+                    }}
+                    onFocus={() => setShowPatientResultsCreate(true)}
+                    placeholder="Rechercher un patient (nom, prénom, email, téléphone...)"
+                    className="w-full border border-pink-300 rounded-lg px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-pink-400 bg-pink-50"
+                    required
+                  />
+                  {patientSearchCreate && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPatientSearchCreate('');
+                        setNewAppt(prev => ({ ...prev, patient: '' }));
+                        setSelectedPatientCreate(null);
+                        setShowPatientResultsCreate(false);
+                      }}
+                      className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    >
+                      <span className="material-symbols-rounded text-2xl">close</span>
+                    </button>
+                  )}
+                  {showPatientResultsCreate && filteredPatientsCreate.length > 0 && (
+                    <div className="absolute z-50 w-full mt-1 bg-white border border-pink-300 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                      {filteredPatientsCreate.map(p => {
+                        const id = getPatientId(p);
+                        if (!id) return null;
+                        const info = getPatientStatusInfo(p);
+                        const name = `${p.prenom || p.firstName || ''} ${p.nom || p.lastName || ''}`.trim() || (p.email || `Patient ${id}`);
+                        const statusSuffix = info.label ? ` — ${info.label}${info.icon ? ` ${info.icon}` : ''}` : '';
+                        const email = p.email ? ` • ${p.email}` : '';
+                        const telephone = p.telephone || p.phone ? ` • ${p.telephone || p.phone}` : '';
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() => handleSelectPatientCreate(p)}
+                            disabled={info.isDeceased}
+                            className={`w-full text-left px-4 py-2 hover:bg-pink-50 border-b border-pink-100 last:border-b-0 ${
+                              info.isDeceased ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                            }`}
+                          >
+                            <div className="font-medium text-gray-900">
+                              {name}{statusSuffix}{info.isDeceased ? ' (bloqué)' : ''}
+                            </div>
+                            {(email || telephone) && (
+                              <div className="text-xs text-gray-500 mt-0.5">
+                                {email}{telephone}
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {showPatientResultsCreate && patientSearchCreate && filteredPatientsCreate.length === 0 && (
+                    <div className="absolute z-50 w-full mt-1 bg-white border border-pink-300 rounded-lg shadow-lg p-4 text-center text-gray-500">
+                      Aucun patient trouvé
+                    </div>
+                  )}
+                </div>
             </div>
               <div>
                 <label className="block text-sm font-medium text-pink-800 mb-1">Médecin</label>
@@ -2045,6 +2881,25 @@ const SLOT_MINUTES = 30;
                   <input type="text" value={newAppt.notes} onChange={(e) => setNewAppt(a => ({ ...a, notes: e.target.value }))} className="w-full border border-pink-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-pink-400 bg-pink-50" />
                         </div>
                     </div>
+              {(() => {
+                const heure = newAppt.heure || '';
+                const [hour] = heure.split(':').map(Number);
+                const isUrgencySlot = hour >= 12 && hour < 14;
+                return isUrgencySlot ? (
+                  <div className="flex items-center gap-2 p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                    <input
+                      type="checkbox"
+                      id="urgenceMedecin"
+                      checked={newAppt.urgenceMedecin || false}
+                      onChange={(e) => setNewAppt(a => ({ ...a, urgenceMedecin: e.target.checked }))}
+                      className="w-4 h-4 text-orange-600 border-orange-300 rounded focus:ring-orange-500"
+                    />
+                    <label htmlFor="urgenceMedecin" className="text-sm font-medium text-orange-800 cursor-pointer">
+                      Urgence médecin
+                    </label>
+                  </div>
+                ) : null;
+              })()}
               <div className="flex justify-end gap-2 pt-4 border-t-2 border-pink-200">
                 <button type="button" onClick={() => setShowCreate(false)} className="px-4 py-2 rounded-lg border-2 border-pink-300 text-pink-700 hover:bg-pink-50 hover:border-pink-400 transition-colors font-medium">Annuler</button>
                 <button type="submit" disabled={loading} className="px-4 py-2 rounded-lg bg-pink-600 text-white hover:bg-pink-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium shadow-lg hover:shadow-xl transition-colors">
@@ -2063,7 +2918,7 @@ const SLOT_MINUTES = 30;
             <div className="px-6 py-4 border-b-2 border-pink-200 bg-pink-50 rounded-t-xl flex items-center justify-between">
               <div className="flex items-center gap-2">
                 <span className="material-symbols-rounded text-pink-600">edit_calendar</span>
-                <h3 className="text-lg font-semibold text-pink-800">Modifier le Rendez-vous</h3>
+                <h3 className="text-2xl font-semibold text-pink-800">Modifier le Rendez-vous</h3>
                 </div>
               <button onClick={() => setShowEdit(false)} className="text-pink-500 hover:text-pink-700 rounded-full p-1 hover:bg-pink-100" aria-label="Fermer">
                 <span className="material-symbols-rounded">close</span>
@@ -2081,6 +2936,79 @@ const SLOT_MINUTES = 30;
                 <div>
                   <label className="block text-sm font-medium text-pink-800 mb-1">Heure</label>
                   <input type="time" value={editAppt.heure} onChange={(e) => setEditAppt(a => ({ ...a, heure: e.target.value }))} className="w-full border border-pink-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-pink-400 bg-pink-50" required />
+                </div>
+              </div>
+              <div className="relative patient-search-edit">
+                <label className="block text-sm font-medium text-pink-800 mb-1">Patient</label>
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={patientSearchEdit}
+                    onChange={(e) => {
+                      setPatientSearchEdit(e.target.value);
+                      setShowPatientResultsEdit(true);
+                      if (!e.target.value) {
+                        setEditAppt(prev => ({ ...prev, patient: '' }));
+                        setSelectedPatientEdit(null);
+                      }
+                    }}
+                    onFocus={() => setShowPatientResultsEdit(true)}
+                    placeholder="Rechercher un patient (nom, prénom, email, téléphone...)"
+                    className="w-full border border-pink-300 rounded-lg px-3 py-2 pr-10 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-pink-400 bg-pink-50"
+                    required
+                  />
+                  {patientSearchEdit && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setPatientSearchEdit('');
+                        setEditAppt(prev => ({ ...prev, patient: '' }));
+                        setSelectedPatientEdit(null);
+                        setShowPatientResultsEdit(false);
+                      }}
+                      className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                    >
+                      <span className="material-symbols-rounded text-2xl">close</span>
+                    </button>
+                  )}
+                  {showPatientResultsEdit && filteredPatientsEdit.length > 0 && (
+                    <div className="absolute z-50 w-full mt-1 bg-white border border-pink-300 rounded-lg shadow-lg max-h-60 overflow-y-auto">
+                      {filteredPatientsEdit.map(p => {
+                        const id = getPatientId(p);
+                        if (!id) return null;
+                        const info = getPatientStatusInfo(p);
+                        const name = `${p.prenom || p.firstName || ''} ${p.nom || p.lastName || ''}`.trim() || (p.email || `Patient ${id}`);
+                        const statusSuffix = info.label ? ` — ${info.label}${info.icon ? ` ${info.icon}` : ''}` : '';
+                        const email = p.email ? ` • ${p.email}` : '';
+                        const telephone = p.telephone || p.phone ? ` • ${p.telephone || p.phone}` : '';
+                        return (
+                          <button
+                            key={id}
+                            type="button"
+                            onClick={() => handleSelectPatientEdit(p)}
+                            disabled={info.isDeceased}
+                            className={`w-full text-left px-4 py-2 hover:bg-pink-50 border-b border-pink-100 last:border-b-0 ${
+                              info.isDeceased ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'
+                            }`}
+                          >
+                            <div className="font-medium text-gray-900">
+                              {name}{statusSuffix}{info.isDeceased ? ' (bloqué)' : ''}
+                            </div>
+                            {(email || telephone) && (
+                              <div className="text-xs text-gray-500 mt-0.5">
+                                {email}{telephone}
+                              </div>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  {showPatientResultsEdit && patientSearchEdit && filteredPatientsEdit.length === 0 && (
+                    <div className="absolute z-50 w-full mt-1 bg-white border border-pink-300 rounded-lg shadow-lg p-4 text-center text-gray-500">
+                      Aucun patient trouvé
+                    </div>
+                  )}
                 </div>
               </div>
                 <div>
@@ -2109,6 +3037,25 @@ const SLOT_MINUTES = 30;
                   <input type="text" value={editAppt.notes} onChange={(e) => setEditAppt(a => ({ ...a, notes: e.target.value }))} className="w-full border border-pink-300 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-pink-500 focus:border-pink-400 bg-pink-50" />
               </div>
               </div>
+              {(() => {
+                const heure = editAppt.heure || '';
+                const [hour] = heure.split(':').map(Number);
+                const isUrgencySlot = hour >= 12 && hour < 14;
+                return isUrgencySlot ? (
+                  <div className="flex items-center gap-2 p-3 bg-orange-50 border border-orange-200 rounded-lg">
+                    <input
+                      type="checkbox"
+                      id="urgenceMedecinEdit"
+                      checked={editAppt.urgenceMedecin || false}
+                      onChange={(e) => setEditAppt(a => ({ ...a, urgenceMedecin: e.target.checked }))}
+                      className="w-4 h-4 text-orange-600 border-orange-300 rounded focus:ring-orange-500"
+                    />
+                    <label htmlFor="urgenceMedecinEdit" className="text-sm font-medium text-orange-800 cursor-pointer">
+                      Urgence médecin
+                    </label>
+                  </div>
+                ) : null;
+              })()}
               <div className="flex justify-end gap-2 pt-4 border-t-2 border-pink-200">
                 <button type="button" onClick={() => setShowEdit(false)} className="px-4 py-2 rounded-lg border-2 border-pink-300 text-pink-700 hover:bg-pink-50 hover:border-pink-400 transition-colors font-medium">Annuler</button>
                 <button type="submit" disabled={loading} className="px-4 py-2 rounded-lg bg-pink-600 text-white hover:bg-pink-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium shadow-lg hover:shadow-xl transition-colors">
@@ -2126,6 +3073,3 @@ const SLOT_MINUTES = 30;
 };
 
 export default Appointments;
-
-
-

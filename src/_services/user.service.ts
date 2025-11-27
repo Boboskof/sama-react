@@ -99,10 +99,12 @@ const userService = {
         headers: { "Content-Type": "application/json", Accept: "application/json" },
       });
 
+      // Le backend retourne le token sous la clé "token"
       const token: string | undefined = resp?.data?.token;
-      if (token) {
-        setStoredToken(token);
+      if (!token) {
+        throw new Error("Token non reçu du serveur");
       }
+      setStoredToken(token);
 
       // Si le back renvoie déjà l'utilisateur
       const inlineUser = resp?.data?.user;
@@ -116,7 +118,6 @@ const userService = {
       await userService.getCurrentUser();
       return resp;
     } catch (error) {
-      console.error("❌ Erreur de connexion:", error);
       throw error;
     }
   },
@@ -124,10 +125,34 @@ const userService = {
   register: (credentials: Record<string, any>) =>
     Axios.post("/auth/register", credentials),
 
-  logout: () => {
-    clearStoredToken();
-    clearStoredUser();
-    dispatchAuthChange();
+  logout: async () => {
+    try {
+      // Appeler l'endpoint de déconnexion pour logger l'événement dans l'audit
+      const token = getStoredToken();
+      if (token) {
+        try {
+          await Axios.post('/token/logout', {}, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+              'Content-Type': 'application/json'
+            },
+            // Ne pas déclencher de déconnexion automatique si cette requête échoue
+            validateStatus: () => true,
+            silent: true
+          } as any);
+        } catch (error) {
+          // Même en cas d'erreur, continuer la déconnexion côté client
+          // (le token peut être expiré ou invalide)
+        }
+      }
+    } catch (error) {
+      // Même en cas d'erreur, continuer la déconnexion côté client
+    } finally {
+      // Toujours nettoyer le token et l'utilisateur, même si l'appel API a échoué
+      clearStoredToken();
+      clearStoredUser();
+      dispatchAuthChange();
+    }
   },
 
   /* ---------- TOKEN / SESSION ---------- */
@@ -168,10 +193,19 @@ const userService = {
   getCurrentUser: async (): Promise<any | null> => {
     if (inflightMe) return inflightMe;
 
-    inflightMe = Axios.get("/me", { headers: { 'X-Silent-Errors': '1' } })
+    // Requête simple GET sans headers personnalisés pour éviter la preflight CORS
+    inflightMe = Axios.get("/me", { 
+      headers: { 
+        'X-Silent-Errors': '1',
+        'Accept': 'application/json'
+      } 
+    })
       .then((response) => {
         const u = response?.data ?? null;
-        if (u) userService.saveUser(u);
+        if (u) {
+          // S'assurer que les données de /api/me sont bien sauvegardées
+          userService.saveUser(u);
+        }
         return u;
       })
       .catch((error) => {
@@ -219,7 +253,7 @@ const userService = {
       headers: { "Content-Type": "application/merge-patch+json" },
     }),
 
-  updateMyPassword: (payload: any) => Axios.patch("/users/updatemypass", payload),
+  updateMyPassword: (payload: any) => Axios.put("/users/me/password", payload),
 
   getMe: () => Axios.get("/me"),
 
@@ -230,8 +264,32 @@ const userService = {
     return roles.includes(role);
   },
   isAdmin: (): boolean => userService.hasRole("ROLE_ADMIN"),
-  isFormateur: (): boolean => userService.hasRole("ROLE_FORMATEUR"),
-  isStagiaire: (): boolean => userService.hasRole("ROLE_STAGIAIRE"),
+  isFormateur: (): boolean => {
+    const u = getStoredUser();
+    // Utiliser isFormateur du backend si disponible
+    if (typeof u?.isFormateur === 'boolean') {
+      return u.isFormateur;
+    }
+    // Sinon utiliser primaryRole si disponible
+    if (u?.primaryRole === 'ROLE_FORMATEUR') {
+      return true;
+    }
+    // Fallback sur la vérification des rôles
+    return userService.hasRole("ROLE_FORMATEUR");
+  },
+  isStagiaire: (): boolean => {
+    const u = getStoredUser();
+    // Utiliser isStagiaire du backend si disponible
+    if (typeof u?.isStagiaire === 'boolean') {
+      return u.isStagiaire;
+    }
+    // Sinon utiliser primaryRole si disponible
+    if (u?.primaryRole === 'ROLE_STAGIAIRE') {
+      return true;
+    }
+    // Fallback sur la vérification des rôles
+    return userService.hasRole("ROLE_STAGIAIRE");
+  },
 };
 
 export default userService;

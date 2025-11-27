@@ -1,7 +1,8 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useSearch } from '../hooks/useSearch';
 
+// Composant SearchBar pour la recherche globale
 const SearchBar = ({ 
   category = null, 
   placeholder = "Rechercher...", 
@@ -15,6 +16,10 @@ const SearchBar = ({
   const inputRef = useRef(null);
   const resultsRef = useRef(null);
 
+  // Mémoriser les options pour éviter les recréations à chaque rendu,
+  // ce qui stabilise le hook useSearch et empêche les boucles d'effets.
+  const searchOptions = useMemo(() => ({ limit: 10 }), []);
+
   const { 
     query, 
     setQuery, 
@@ -22,13 +27,26 @@ const SearchBar = ({
     loading, 
     error, 
     quickSearch 
-  } = useSearch(category, { limit: 10 });
+  } = useSearch(category, searchOptions);
 
-  // Recherche rapide pour autocomplétion
+  // Recherche rapide pour autocomplétion avec debounce (350ms)
   useEffect(() => {
-    if (query && showQuickResults) {
-      quickSearch(query);
+    // Si la query est vide ou trop courte, nettoyer immédiatement
+    if (!query || query.length < 2) {
+      setIsOpen(false);
+      return;
     }
+
+    if (!showQuickResults) {
+      return;
+    }
+
+    // Debounce pour éviter trop d'appels API
+    const timeoutId = setTimeout(() => {
+      quickSearch(query);
+    }, 350); // 350ms de debounce pour limiter les appels API
+
+    return () => clearTimeout(timeoutId);
   }, [query, quickSearch, showQuickResults]);
 
   const handleInputChange = (e) => {
@@ -124,7 +142,17 @@ const SearchBar = ({
   const getResultLabel = (result) => {
     switch (result.type) {
       case 'patient':
-        return `${result.metadata?.patient_name || 'Patient inconnu'}`;
+        // Pour les patients, vérifier d'abord les propriétés directes (nom, prenom)
+        // puis fallback sur metadata.patient_name
+        if (result.nom || result.prenom) {
+          const genre = result.genre || result.gender || result.civilite || '';
+          const nom = result.nom || '';
+          const prenom = result.prenom || '';
+          const genreStr = genre ? `${genre} ` : '';
+          const nameStr = nom ? (prenom ? `${nom} ${prenom}` : nom) : (prenom || 'Patient inconnu');
+          return genreStr ? `${genreStr}${nameStr}` : nameStr;
+        }
+        return `${result.metadata?.patient_name || result.title || 'Patient inconnu'}`;
       case 'rendez_vous':
         return `${result.metadata?.patient_name || 'Patient'} - ${result.metadata?.created_at || ''}`;
       case 'document':

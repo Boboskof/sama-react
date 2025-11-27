@@ -1,0 +1,94 @@
+/* Couleurs pour les icônes d'actions d'audit */
+.audit-icon-green {
+  color: #10b981; /* green-500 */
+}
+
+.audit-icon-blue {
+  color: #3b82f6; /* blue-500 */
+}
+
+.audit-icon-red {
+  color: #ef4444; /* red-500 */
+}
+
+.audit-icon-purple {
+  color: #8b5cf6; /* purple-500 */
+}
+
+.audit-icon-gray {
+  color: #6b7280; /* gray-500 */
+}
+
+.audit-icon-yellow {
+  color: #eab308; /* yellow-500 */
+}
+
+.audit-icon-indigo {
+  color: #6366f1; /* indigo-500 */
+}
+
+/* Couleurs pour les lignes d'actions d'audit */
+.audit-row-green {
+  border-left: 4px solid #10b981;
+}
+
+.audit-row-blue {
+  border-left: 4px solid #3b82f6;
+}
+
+.audit-row-red {
+  border-left: 4px solid #ef4444;
+}
+
+.audit-row-purple {
+  border-left: 4px solid #8b5cf6;
+}
+
+.audit-row-gray {
+  border-left: 4px solid #6b7280;
+}
+
+.audit-row-yellow {
+  border-left: 4px solid #eab308;
+}
+
+.audit-row-indigo {
+  border-left: 4px solid #6366f1;
+}
+
+/* Couleurs pour les badges d'actions d'audit */
+.audit-badge-green {
+  background-color: #d1fae5; /* green-100 */
+  color: #065f46; /* green-800 */
+}
+
+.audit-badge-blue {
+  background-color: #dbeafe; /* blue-100 */
+  color: #1e40af; /* blue-800 */
+}
+
+.audit-badge-red {
+  background-color: #fee2e2; /* red-100 */
+  color: #991b1b; /* red-800 */
+}
+
+.audit-badge-purple {
+  background-color: #e9d5ff; /* purple-100 */
+  color: #6b21a8; /* purple-800 */
+}
+
+.audit-badge-gray {
+  background-color: #f3f4f6; /* gray-100 */
+  color: #1f2937; /* gray-800 */
+}
+
+.audit-badge-yellow {
+  background-color: #fef9c3; /* yellow-100 */
+  color: #854d0e; /* yellow-800 */
+}
+
+.audit-badge-indigo {
+  background-color: #e0e7ff; /* indigo-100 */
+  color: #3730a3; /* indigo-800 */
+}
+

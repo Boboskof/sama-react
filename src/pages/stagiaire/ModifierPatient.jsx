@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import patientService from '../../_services/patient.service';
-import mutuelleService from '../../_services/mutuelle.service';
+import { useMutuelles, useCreateMutuelle } from '../../hooks/useMutuelles';
 import LoadingSpinner from '../../components/LoadingSpinner';
 
 const ModifierPatient = () => {
@@ -11,14 +11,22 @@ const ModifierPatient = () => {
   const [loadingPatient, setLoadingPatient] = useState(true);
   const [originalNumeroSecu, setOriginalNumeroSecu] = useState('');
 
-  // Mutuelles
-  const [insuranceCompanies, setInsuranceCompanies] = useState([]);
-  const [loadingInsurance, setLoadingInsurance] = useState(true);
+  // Mutuelles avec React Query
+  const { data: mutuelles = [], isLoading: loadingInsurance, error: mutuellesError } = useMutuelles();
+  const createMutuelleMutation = useCreateMutuelle();
+  
+  // Trier les mutuelles par ordre alphabétique
+  const insuranceCompanies = useMemo(() => {
+    return [...mutuelles].sort((a, b) => {
+      const nameA = (a.nom || a.name || '').toLowerCase().trim();
+      const nameB = (b.nom || b.name || '').toLowerCase().trim();
+      return nameA.localeCompare(nameB, 'fr', { sensitivity: 'base' });
+    });
+  }, [mutuelles]);
   
   // États pour l'option "Autre" mutuelle
   const [showCustomMutuelle, setShowCustomMutuelle] = useState(false);
   const [customMutuelleName, setCustomMutuelleName] = useState('');
-  const [creatingCustomMutuelle, setCreatingCustomMutuelle] = useState(false);
   const [loadError, setLoadError] = useState('');
 
   // Form
@@ -45,9 +53,9 @@ const ModifierPatient = () => {
     notesAllergies: '',
     notesTraitements: '',
     notesAutres: '',
-    // Champs supplémentaires
-    emergencyContact: '',
-    emergencyPhone: '',
+    // Champs de contact d'urgence
+    contactUrgenceNom: '',
+    contactUrgenceTelephone: '',
     // Champs de couverture mutuelle
     mutuelleId: '', // ID de la mutuelle sélectionnée
     numeroAdherent: '',
@@ -56,23 +64,65 @@ const ModifierPatient = () => {
     couvertureValide: true
   });
 
-  // Charger les mutuelles
+  // Gérer les erreurs de chargement des mutuelles
   useEffect(() => {
-    const loadInsuranceCompanies = async () => {
-      try {
-        setLoadingInsurance(true);
-        const companies = await mutuelleService.getAllMutuelles();
-        setInsuranceCompanies(companies);
-      } catch (error) {
-        console.error('Erreur lors du chargement des mutuelles:', error);
-        setLoadError('Erreur lors du chargement des mutuelles');
-      } finally {
-        setLoadingInsurance(false);
-      }
-    };
+    if (mutuellesError) {
+      setLoadError('Erreur lors du chargement des mutuelles');
+    } else {
+      setLoadError('');
+    }
+  }, [mutuellesError]);
 
-    loadInsuranceCompanies();
-  }, []);
+  // Fonction pour parser organismeSecu et extraire caissePayante, caisseLieu, caisseAutreNom
+  const parseOrganismeSecu = (organismeSecu) => {
+    if (!organismeSecu || !organismeSecu.trim()) {
+      return { caissePayante: '', caisseLieu: '', caisseAutreNom: '' };
+    }
+
+    const org = organismeSecu.trim();
+    const ENUM_LABELS = { CPAM: 'CPAM', CGSS: 'CGSS', MSA: 'MSA', CNMSS: 'CNMSS', ENIM: 'ENIM', CANSSM: 'CANSSM', CPR_SNCF: 'CPR SNCF', RATP: 'RATP', CAMIEG: 'CAMIEG', AUTRE: 'Autre' };
+    
+    // Vérifier si c'est un format "LABEL de LIEU" (pour CPAM, CGSS, MSA)
+    const needsLieu = ['CPAM', 'CGSS', 'MSA'];
+    for (const [key, label] of Object.entries(ENUM_LABELS)) {
+      if (needsLieu.includes(key)) {
+        // Format: "CPAM de Paris" ou "CGSS de Guadeloupe"
+        const pattern = new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+de\\s+(.+)$`, 'i');
+        const match = org.match(pattern);
+        if (match) {
+          return {
+            caissePayante: key,
+            caisseLieu: match[1].trim(),
+            caisseAutreNom: ''
+          };
+        }
+        // Format exact: "CPAM", "CGSS", "MSA" (comparaison insensible à la casse)
+        if (org.toUpperCase() === label.toUpperCase()) {
+          return {
+            caissePayante: key,
+            caisseLieu: '',
+            caisseAutreNom: ''
+          };
+        }
+      } else {
+        // Pour les autres caisses (CNMSS, ENIM, etc.), format exact (comparaison insensible à la casse)
+        if (org.toUpperCase() === label.toUpperCase()) {
+          return {
+            caissePayante: key,
+            caisseLieu: '',
+            caisseAutreNom: ''
+          };
+        }
+      }
+    }
+    
+    // Si aucun match, c'est probablement "AUTRE" avec un nom personnalisé
+    return {
+      caissePayante: 'AUTRE',
+      caisseLieu: '',
+      caisseAutreNom: org
+    };
+  };
 
   // Charger les données du patient
   useEffect(() => {
@@ -80,6 +130,9 @@ const ModifierPatient = () => {
       try {
         setLoadingPatient(true);
         const patient = await patientService.getOnePatient(id);
+        
+        // Parser organismeSecu pour extraire caissePayante, caisseLieu, caisseAutreNom
+        const { caissePayante, caisseLieu, caisseAutreNom } = parseOrganismeSecu(patient.organismeSecu);
         
         // Mapper les données du patient vers le formulaire
         setFormData({
@@ -96,12 +149,15 @@ const ModifierPatient = () => {
           codePostal: patient.codePostal || '',
           numeroSecu: patient.numeroSecu || '',
           organismeSecu: patient.organismeSecu || '',
+          caissePayante: caissePayante,
+          caisseLieu: caisseLieu,
+          caisseAutreNom: caisseAutreNom,
           notesAntecedents: patient.notes?.antecedents || '',
           notesAllergies: patient.notes?.allergies || '',
           notesTraitements: patient.notes?.traitements || '',
           notesAutres: patient.notes?.autres || '',
-          emergencyContact: patient.emergencyContact || '',
-          emergencyPhone: patient.emergencyPhone || '',
+          contactUrgenceNom: patient.contactUrgenceNom || '',
+          contactUrgenceTelephone: patient.contactUrgenceTelephone || '',
           mutuelleId: patient.mutuelleId || '',
           numeroAdherent: patient.numeroAdherent || '',
           dateDebutCouverture: patient.dateDebutCouverture ? patient.dateDebutCouverture.split('T')[0] : '',
@@ -129,6 +185,11 @@ const ModifierPatient = () => {
     if (name === 'numeroSecu') {
       nextValue = String(value).replace(/\D/g, '').slice(0, 13);
     }
+    // Nettoyer le téléphone (principal et d'urgence) pour le backend
+    if (name === 'telephone' || name === 'contactUrgenceTelephone') {
+      // Garder seulement les chiffres, +, espaces, tirets, parenthèses et points
+      nextValue = value.replace(/[^0-9\s\+\-\(\)\.]/g, '');
+    }
     setFormData(prev => ({
       ...prev,
       [name]: nextValue
@@ -143,19 +204,16 @@ const ModifierPatient = () => {
     if (!customMutuelleName.trim()) return;
     
     try {
-      setCreatingCustomMutuelle(true);
-      const newMutuelle = await mutuelleService.createMutuelle({
+      const newMutuelle = await createMutuelleMutation.mutateAsync({
         nom: customMutuelleName.trim()
       });
       
-      setInsuranceCompanies(prev => [...prev, newMutuelle]);
+      // Utiliser l'ID de la nouvelle mutuelle
       setFormData(prev => ({ ...prev, mutuelleId: newMutuelle.id }));
       setShowCustomMutuelle(false);
       setCustomMutuelleName('');
     } catch (error) {
       console.error('Erreur lors de la création de la mutuelle:', error);
-    } finally {
-      setCreatingCustomMutuelle(false);
     }
   };
 
@@ -196,11 +254,27 @@ const ModifierPatient = () => {
         organismeSecuComputed = formData.organismeSecu || '';
       }
 
+      // Normaliser le téléphone (comme dans le formulaire de création)
+      const normalizePhoneForBackend = (phone) => {
+        if (!phone) return undefined;
+        // Supprimer tous les espaces, tirets, parenthèses et points
+        let cleaned = phone.replace(/[\s\-\(\)\.]/g, '');
+        // Si commence par +33, remplacer par 0
+        if (cleaned.startsWith('+33')) {
+          cleaned = '0' + cleaned.substring(3);
+        }
+        // Si commence par 33 et a 12 chiffres, remplacer par 0
+        if (cleaned.startsWith('33') && cleaned.length === 12) {
+          cleaned = '0' + cleaned.substring(2);
+        }
+        return cleaned;
+      };
+
       const patientData = {
         prenom: formData.prenom,
         nom: formData.nom,
         email: formData.email,
-        telephone: formData.telephone,
+        telephone: normalizePhoneForBackend(formData.telephone),
         dateNaissance: formData.dateNaissance,
         genre: formData.genre,
         statut: formData.statut,
@@ -220,8 +294,8 @@ const ModifierPatient = () => {
           const hasAny = Object.values(n).some(v => v && v.length > 0);
           return hasAny ? n : undefined;
         })(),
-        emergencyContact: formData.emergencyContact,
-        emergencyPhone: formData.emergencyPhone
+        contactUrgenceNom: formData.contactUrgenceNom || null,
+        contactUrgenceTelephone: normalizePhoneForBackend(formData.contactUrgenceTelephone) || null
       };
 
       // Ajouter les données de couverture si une mutuelle est sélectionnée
@@ -241,8 +315,8 @@ const ModifierPatient = () => {
     } catch (error) {
       console.error('Erreur lors de la modification du patient:', error);
       if (error?.response) {
-        console.error('🔎 Status:', error.response.status);
-        console.error('🔎 Data:', error.response.data);
+        console.error('Status:', error.response.status);
+        console.error('Data:', error.response.data);
       }
     } finally {
       setLoading(false);
@@ -263,7 +337,7 @@ const ModifierPatient = () => {
 
   if (loadError) {
     return (
-      <div className="space-y-6 bg-orange-100 min-h-screen p-6 flex items-center justify-center">
+      <div className="space-y-6 bg-orange-100 min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6 flex items-center justify-center">
         <div className="bg-orange-50 p-8 rounded-lg shadow-md text-center">
           <div className="text-red-500 text-6xl mb-4">⚠️</div>
           <h2 className="text-2xl font-bold text-gray-900 mb-4">Erreur</h2>
@@ -280,7 +354,7 @@ const ModifierPatient = () => {
   }
 
   return (
-    <div className="space-y-6 bg-orange-100 min-h-screen p-6">
+    <div className="space-y-6 bg-orange-100 min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6">
       <div className="max-w-4xl mx-auto px-4">
         {/* Header */}
         <div className="bg-orange-200 rounded-lg shadow-md p-6 mb-6">
@@ -309,6 +383,21 @@ const ModifierPatient = () => {
               </h2>
               
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Genre
+                  </label>
+                  <select
+                    name="genre"
+                    value={formData.genre}
+                    onChange={handleInputChange}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500"
+                  >
+                    <option value="Mr">Monsieur</option>
+                    <option value="Mme">Madame</option>
+                  </select>
+                </div>
+
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
                     Prénom *
@@ -374,21 +463,6 @@ const ModifierPatient = () => {
                     onChange={handleInputChange}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500"
                   />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Genre
-                  </label>
-                  <select
-                    name="genre"
-                    value={formData.genre}
-                    onChange={handleInputChange}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500"
-                  >
-                    <option value="Mr">Monsieur</option>
-                    <option value="Mme">Madame</option>
-                  </select>
                 </div>
 
                 <div>
@@ -562,12 +636,12 @@ const ModifierPatient = () => {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Nom du contact d'urgence
+                    Nom du contact d'urgence / Lien avec le patient
                   </label>
                   <input
                     type="text"
-                    name="emergencyContact"
-                    value={formData.emergencyContact}
+                    name="contactUrgenceNom"
+                    value={formData.contactUrgenceNom}
                     onChange={handleInputChange}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500"
                   />
@@ -579,8 +653,8 @@ const ModifierPatient = () => {
                   </label>
                   <input
                     type="tel"
-                    name="emergencyPhone"
-                    value={formData.emergencyPhone}
+                    name="contactUrgenceTelephone"
+                    value={formData.contactUrgenceTelephone}
                     onChange={handleInputChange}
                     className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-orange-500"
                   />

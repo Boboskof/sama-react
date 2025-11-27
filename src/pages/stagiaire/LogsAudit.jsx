@@ -137,27 +137,22 @@ const LogsAudit = () => {
   };
 
   const getActionIcon = (action) => {
-    const icons = {
-      'CREATE': '➕',
-      'UPDATE': '✏️',
-      'DELETE': '🗑️',
-      'LOGIN': '🔐',
-      'LOGOUT': '🚪',
-      'VIEW': '👁️'
-    };
-    return icons[action];
+    return auditService.getActionIcon(action);
   };
 
-  const getActionColor = (action) => {
-    const colors = {
-      'CREATE': 'text-green-600 bg-green-100',
-      'UPDATE': 'text-blue-600 bg-blue-100',
-      'DELETE': 'text-red-600 bg-red-100',
-      'LOGIN': 'text-purple-600 bg-purple-100',
-      'LOGOUT': 'text-gray-600 bg-gray-100',
-      'VIEW': 'text-yellow-600 bg-yellow-100'
-    };
-    return colors[action];
+  const getActionIconClass = (action) => {
+    const color = auditService.getActionColor(action);
+    return `audit-icon-${color}`;
+  };
+
+  const getActionRowClass = (action) => {
+    const color = auditService.getActionColor(action);
+    return `audit-row-${color}`;
+  };
+
+  const getActionBadgeClass = (action) => {
+    const color = auditService.getActionColor(action);
+    return `audit-badge-${color}`;
   };
 
   const getPatientName = (log) => {
@@ -169,7 +164,7 @@ const LogsAudit = () => {
     if (fullName && String(fullName).trim()) return fullName;
     const prenom = (log?.payload?.after?.prenom || log?.payload?.before?.prenom || '').trim();
     const nom = (log?.payload?.after?.nom || log?.payload?.before?.nom || '').trim();
-    const composed = `${prenom} ${nom}`.trim();
+    const composed = `${nom} ${prenom}`.trim(); // Format: "nom prénom"
     if (composed) return composed;
     return null;
   };
@@ -409,23 +404,25 @@ const LogsAudit = () => {
               {logs.map((log, index) => (
                 <div
                   key={log.id || `${log.entity_id || log.entityId || 'log'}-${index}`}
-                  className="px-6 py-4 hover:bg-gray-50 cursor-pointer"
+                  className={`px-6 py-4 hover:bg-gray-50 cursor-pointer ${getActionRowClass(log.action)}`}
                   onClick={() => showLogDetails(log)}
                 >
                   <div className="flex items-start space-x-4">
                     <div className="flex-shrink-0">
-                      <span className="text-2xl">{getActionIcon(log.action)}</span>
+                      <span className={`material-symbols-rounded text-2xl ${getActionIconClass(log.action)}`}>
+                        {getActionIcon(log.action)}
+                      </span>
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between">
                         <div>
                           <p className="text-sm font-medium text-gray-900">
-                            {log.user?.prenom} {log.user?.nom}
+                            {log.user?.full_name || (log.user?.prenom || log.user?.nom ? `${log.user.prenom || ''} ${log.user.nom || ''}`.trim() : 'Anonyme')}
                           </p>
                           <p className="text-sm text-gray-500">{log.user?.email}</p>
                         </div>
                         <div className="flex items-center space-x-2">
-                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getActionColor(log.action)}`}>
+                          <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${getActionBadgeClass(log.action)}`}>
                             {log.action}
                           </span>
                           <span className="text-xs text-gray-400">
@@ -550,7 +547,7 @@ const LogsAudit = () => {
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Utilisateur</label>
                       <p className="text-sm text-gray-900">
-                        {selectedLog.user.prenom} {selectedLog.user.nom} ({selectedLog.user.email})
+                        {selectedLog.user.full_name || `${selectedLog.user.prenom || ''} ${selectedLog.user.nom || ''}`.trim()} ({selectedLog.user.email})
                       </p>
                     </div>
                   )}

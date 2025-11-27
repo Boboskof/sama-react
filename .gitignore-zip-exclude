@@ -1,0 +1,37 @@
+# Fichiers et dossiers à exclure lors de la création du ZIP
+# Utiliser avec le script create-backend-zip
+
+# Dépendances
+vendor/
+node_modules/
+
+# Cache et logs
+var/
+.cache/
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environnement local
+.env.local
+.env.local.php
+.env.*.local
+
+# Fichiers temporaires
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# Symfony
+/bundles/
+.phpunit.result.cache
+

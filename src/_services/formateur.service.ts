@@ -83,10 +83,8 @@ const formateurService = {
       return response.data;
     } catch (error) {
       const status = (error as any)?.response?.status;
-      if (status !== 404) {
-        console.error('❌ Erreur récupération dashboard formateur:', error);
-      } else if (import.meta.env.DEV) {
-        console.warn('⚠️ Endpoint /formateur/dashboard non disponible, fallback valeurs vides.');
+      if (status !== 404 && import.meta.env.DEV) {
+        console.warn('Endpoint /formateur/dashboard non disponible, fallback valeurs vides.');
       }
       // Fallback si l'endpoint n'existe pas encore côté back
       if (status === 404) {
@@ -108,23 +106,43 @@ const formateurService = {
   // ----- Stagiaires -----
   async getAllStagiaires(): Promise<Stagiaire[]> {
     try {
-      // Endpoint réservé formateur
+      // Endpoint réservé formateur - retourne directement un tableau JSON
       const resPrimary = await Axios.get('/users/stagiaires');
-      const data = resPrimary.data?.data || resPrimary.data || [];
-      return Array.isArray(data) ? data : [];
-    } catch (error) {
-      // Fallback admin paginé/filtrable
-      try {
-        const response = await Axios.get('/users', {
-          params: { role: 'ROLE_STAGIAIRE', page: 1, limit: 50 }
-        });
-        const payload = response.data;
-        const list = payload?.data || payload?.['hydra:member'] || payload?.member || payload || [];
-        return Array.isArray(list) ? list : [];
-      } catch (e2) {
-        console.error('❌ Erreur récupération stagiaires:', e2);
-        return [];
+      // L'endpoint retourne directement un tableau JSON, pas un objet avec une clé 'data'
+      if (Array.isArray(resPrimary.data)) {
+        return resPrimary.data;
       }
+      // Fallback si la structure est différente
+      const data = resPrimary.data?.data || resPrimary.data?.users || resPrimary.data || [];
+      return Array.isArray(data) ? data : [];
+    } catch (error: any) {
+      // Ne pas faire de fallback vers /api/users car il nécessite ROLE_ADMIN
+      // Les formateurs n'ont accès qu'à /api/users/stagiaires
+      if (error?.response?.status === 403) {
+        console.warn('Accès refusé: seuls les formateurs peuvent accéder à cette ressource');
+      } else if (error?.response?.status === 401) {
+        console.warn('Non authentifié: veuillez vous reconnecter');
+      } else {
+        console.warn('Erreur lors de la récupération des stagiaires:', error?.message || error);
+      }
+      return [];
+    }
+  },
+
+  async createStagiaire(stagiaireData: {
+    email: string;
+    password: string;
+    prenom: string;
+    nom: string;
+    typeStagiaire?: string;
+    section?: string;
+  }): Promise<Stagiaire> {
+    try {
+      const response = await Axios.post('/users/stagiaires', stagiaireData);
+      return response.data.user;
+    } catch (error: any) {
+      const errorMessage = error?.response?.data?.error || error?.response?.data?.message || 'Erreur lors de la création du stagiaire';
+      throw new Error(errorMessage);
     }
   },
 
@@ -178,16 +196,22 @@ const formateurService = {
       }
     }
 
-    // Fetch recent audit logs (API Platform only; no legacy fallback)
+    // Fetch recent audit logs - Utiliser /api/audit/logs (recommandé) au lieu de /api/audit_logs (désactivé)
     let logs: any[] = [];
-    let lr1Status: number | undefined;
-    // Prefer API Platform collection
     try {
-      const lr1 = await Axios.get('/audit_logs', { params: { 'user[exists]': 1, 'user.id': id, 'user.primaryRole': 'ROLE_STAGIAIRE', 'order[createdAt]': 'desc', itemsPerPage: 50 }, validateStatus: () => true });
-      lr1Status = lr1?.status;
-      if (lr1Status && lr1Status < 300) {
+      // Utiliser l'endpoint recommandé /api/audit/logs selon la documentation
+      const lr1 = await Axios.get('/audit/logs', { 
+        params: { 
+          user_id: id,
+          limit: 50,
+          page: 1
+        }, 
+        validateStatus: () => true 
+      });
+      if (lr1?.status && lr1.status < 300) {
         const d = lr1.data as any;
-        const arr = (d?.['hydra:member'] ?? d?.member ?? d?.data ?? []) as any[];
+        // L'endpoint /api/audit/logs retourne { data: [...], pagination: {...} }
+        const arr = (d?.data ?? []) as any[];
         logs = Array.isArray(arr) ? arr : [];
       }
     } catch {}
@@ -214,35 +238,31 @@ const formateurService = {
     page: number;
     totalPages: number;
   }> {
-    // Par défaut: si aucun user ciblé, exclure le rôle formateur via endpoint recherche global
+    // Utiliser l'endpoint recommandé /api/audit/logs au lieu de /api/audit_logs (désactivé)
     const page = Number((filtres.page as any) || 1);
-    const limit = Number((filtres.limit as any) || 30);
+    const limit = Number((filtres.limit as any) || 50); // 50 par défaut selon la documentation
 
-    const hasUser = Boolean((filtres as any).userId);
-
-    // Utiliser API Platform /audit_logs avec user[exists]=1 (et limiter aux stagiaires côté user)
+    // Construire les paramètres pour /api/audit/logs
     const params: Record<string, any> = {
-      'user[exists]': 1,
-      'order[createdAt]': 'desc',
       page,
-      itemsPerPage: limit,
+      limit,
     };
-    if (!hasUser) params['user.primaryRole'] = 'ROLE_STAGIAIRE';
-    if ((filtres as any).userId) params['user.id'] = (filtres as any).userId;
+    if ((filtres as any).userId) params['user_id'] = (filtres as any).userId;
     if ((filtres as any).action) params['action'] = (filtres as any).action;
-    if ((filtres as any).entityType) params['entityType'] = (filtres as any).entityType;
-    if ((filtres as any).dateDebut) params['createdAt[after]'] = (filtres as any).dateDebut;
-    if ((filtres as any).dateFin) params['createdAt[before]'] = (filtres as any).dateFin;
+    if ((filtres as any).entityType) params['entity_class'] = (filtres as any).entityType;
+    if ((filtres as any).dateDebut) params['date_from'] = (filtres as any).dateDebut;
+    if ((filtres as any).dateFin) params['date_to'] = (filtres as any).dateFin;
 
     try {
-      const response = await Axios.get('/audit_logs', { params });
+      // ✅ Utiliser /api/audit/logs (recommandé) au lieu de /api/audit_logs (désactivé)
+      const response = await Axios.get('/audit/logs', { params });
       const payload = response.data as any;
-      const list = (payload?.['hydra:member'] ?? payload?.member ?? payload?.data ?? (Array.isArray(payload) ? payload : [])) as any[];
-      const total = Number(payload?.['hydra:totalItems'] ?? payload?.total ?? list.length ?? 0);
-      const totalPages = Math.max(1, Math.ceil((total || 0) / (limit || 50)));
+      // L'endpoint /api/audit/logs retourne { data: [...], pagination: { total: 76, ... } }
+      const list = (payload?.data ?? []) as any[];
+      const total = Number(payload?.pagination?.total ?? 0); // ✅ Utiliser pagination.total (76, pas 50)
+      const totalPages = Number(payload?.pagination?.pages ?? Math.max(1, Math.ceil((total || 0) / limit)));
       return { logs: Array.isArray(list) ? list : [], total, page, totalPages };
     } catch (error: any) {
-      console.error('❌ Erreur récupération logs audit:', error);
       return { logs: [], total: 0, page: 1, totalPages: 1 };
     }
   },
@@ -252,7 +272,6 @@ const formateurService = {
       const response = await Axios.get(`/audit/${logId}`);
       return response.data;
     } catch (error) {
-      console.error('❌ Erreur récupération détails log:', error);
       throw error;
     }
   },
@@ -263,7 +282,6 @@ const formateurService = {
       const response = await Axios.get(`/audit?${params.toString()}`);
       return response.data.data || [];
     } catch (error) {
-      console.error('❌ Erreur recherche logs:', error);
       return [];
     }
   },
@@ -275,7 +293,6 @@ const formateurService = {
       const response = await Axios.get(`/audit/statistics/period?${params.toString()}`);
       return response.data;
     } catch (error) {
-      console.error('❌ Erreur récupération stats activité:', error);
       return [];
     }
   },
@@ -286,7 +303,6 @@ const formateurService = {
       const response = await Axios.get(`/audit/statistics/actions?${params.toString()}`);
       return response.data;
     } catch (error) {
-      console.error('❌ Erreur récupération répartition actions:', error);
       return [];
     }
   },
@@ -296,7 +312,6 @@ const formateurService = {
       const response = await Axios.get(`/audit/user/${stagiaireId}/recent`, { params: { limit: 50 } });
       return response.data;
     } catch (error) {
-      console.error('❌ Erreur récupération patterns:', error);
       return [];
     }
   },
@@ -307,7 +322,6 @@ const formateurService = {
       const response = await Axios.get('/alertes');
       return response.data.data || [];
     } catch (error) {
-      console.error('❌ Erreur récupération alertes:', error);
       return [];
     }
   },
@@ -316,7 +330,7 @@ const formateurService = {
     try {
       await Axios.put(`/alertes/${alerteId}/lu`);
     } catch (error) {
-      console.error('❌ Erreur marquage alerte:', error);
+      // Erreur silencieuse
     }
   },
 
@@ -330,7 +344,6 @@ const formateurService = {
       });
       return response.data;
     } catch (error) {
-      console.error('❌ Erreur génération rapport:', error);
       throw error;
     }
   },
@@ -349,7 +362,7 @@ const formateurService = {
       link.click();
       link.remove();
     } catch (error) {
-      console.error('❌ Erreur téléchargement rapport:', error);
+      // Erreur silencieuse
     }
   },
 
@@ -368,7 +381,7 @@ const formateurService = {
       link.click();
       link.remove();
     } catch (error) {
-      console.error('❌ Erreur export CSV:', error);
+      // Erreur silencieuse
     }
   },
 
@@ -387,7 +400,7 @@ const formateurService = {
       link.click();
       link.remove();
     } catch (error) {
-      console.error('❌ Erreur export JSON:', error);
+      // Erreur silencieuse
     }
   },
 
@@ -397,7 +410,6 @@ const formateurService = {
       const response = await Axios.get('/formateur/parametres');
       return response.data;
     } catch (error) {
-      console.error('❌ Erreur récupération paramètres:', error);
       return {};
     }
   },
@@ -406,7 +418,7 @@ const formateurService = {
     try {
       await Axios.put('/formateur/parametres', parametres);
     } catch (error) {
-      console.error('❌ Erreur sauvegarde paramètres:', error);
+      // Erreur silencieuse
     }
   }
 };

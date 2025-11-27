@@ -3,10 +3,14 @@ import axios, { AxiosInstance, AxiosError } from "axios";
 
 // 1) Base URL unique
 // - En dev: passe par le proxy Vite (évite CORS) → "/api"
+//   OU utilise l'URL absolue si VITE_API_URL est définie (pour tester CORS)
 // - En prod: utilise l'URL complète fournie par VITE_API_URL
-const baseURLRaw =
-  (import.meta as any)?.env?.VITE_API_URL ??
-  ((import.meta as any)?.env?.DEV ? "/api" : "http://localhost:8000/api");
+const isDev = import.meta.env.DEV || import.meta.env.MODE === 'development';
+// Si VITE_API_URL est définie, l'utiliser (même en dev, pour tester CORS)
+// Sinon, en dev utiliser le proxy Vite, en prod l'URL par défaut
+const baseURLRaw = import.meta.env.VITE_API_URL 
+  ? import.meta.env.VITE_API_URL
+  : (isDev ? "/api" : "http://localhost:8000/api");
 // Force un trailing slash pour éviter les redirections 301 (ex: /api/communications/)
 const baseURL = (String(baseURLRaw).endsWith('/') ? String(baseURLRaw) : String(baseURLRaw) + '/');
 // Racine API (sans /api) pour les endpoints d'auth
@@ -14,17 +18,14 @@ const baseURL = (String(baseURLRaw).endsWith('/') ? String(baseURLRaw) : String(
 const rootBaseURL = baseURL.startsWith("/") ? "/auth" : baseURL.replace(/\/?api$/, "");
 
 // 2) Instance JSON par défaut (API sous /api)
-const DEBUG = !!(import.meta as any)?.env?.DEV;
 // Toujours envoyer les cookies (session Symfony) et autoriser les JWT côté client
 axios.defaults.withCredentials = true;
 
 const Axios: AxiosInstance = axios.create({
   baseURL,
-  timeout: 15000,
+  timeout: 30000, // Augmenté à 30s pour éviter les timeouts sur les requêtes lourdes
   headers: {
-    "Content-Type": "application/ld+json",
     Accept: "application/ld+json, application/json",
-    "X-Requested-With": "XMLHttpRequest",
   },
   withCredentials: true,
 });
@@ -32,7 +33,7 @@ const Axios: AxiosInstance = axios.create({
 // Instance dédiée auth (root, sans /api)
 export const AxiosAuth: AxiosInstance = axios.create({
   baseURL: rootBaseURL,
-  timeout: 15000,
+  timeout: 30000, // Augmenté à 30s pour cohérence
   headers: {
     Accept: "application/json",
     "X-Requested-With": "XMLHttpRequest",
@@ -41,12 +42,10 @@ export const AxiosAuth: AxiosInstance = axios.create({
 });
 
 // 3) Instance dédiée aux uploads (laisser Axios gérer le Content-Type)
+// Pas de headers personnalisés pour éviter les preflight CORS inutiles
 export const AxiosUpload: AxiosInstance = axios.create({
   baseURL,
   timeout: 30000,
-  headers: {
-    "X-Requested-With": "XMLHttpRequest",
-  },
   withCredentials: true,
 });
 
@@ -59,19 +58,12 @@ function attachAuthInterceptor(instance: AxiosInstance): void {
   instance.interceptors.request.use((request) => {
     try {
       const token = localStorage.getItem("token");
-      if (import.meta.env.DEV) {
-      }
       if (token) {
         request.headers = request.headers ?? {};
-        // AxiosHeaders est compatible avec une assignation clé/valeur
-        (request.headers as any).Authorization = `Bearer ${token}`;
-        if (import.meta.env.DEV) {
-        }
-      } else {
-      // Log de debug supprimé pour la production
+        request.headers.Authorization = `Bearer ${token}`;
       }
     } catch (error) {
-      console.error("❌ Erreur lors de la récupération du token:", error);
+      // Erreur silencieuse lors de la récupération du token
     }
     return request;
   });
@@ -85,7 +77,6 @@ function attachAuthInterceptor(instance: AxiosInstance): void {
       const status = error.response?.status;
       const url = (error.config?.url as string) ?? "";
       const silent = (error.config as any)?.silent === true || ((error.config?.headers as any)?.['X-Silent-Errors'] === '1');
-      if (DEBUG && !silent) console.error("❌ Erreur interceptée:", status, "pour l'URL:", url);
 
       
 
@@ -99,16 +90,33 @@ function attachAuthInterceptor(instance: AxiosInstance): void {
       const shouldAutoLogout = status === 401 && !authEndpoint;
 
       if (shouldAutoLogout) {
-        // Log de debug supprimé pour la production
         try {
+          // Appeler l'endpoint de déconnexion pour logger l'événement dans l'audit
+          // Faire l'appel de manière non-bloquante (sans await) pour ne pas bloquer l'intercepteur
+          const token = localStorage.getItem("token");
+          if (token) {
+            // Appel asynchrone non-bloquant - ne pas attendre la réponse
+            axios.post(
+              baseURL + 'token/logout',
+              {},
+              {
+                headers: {
+                  'Authorization': `Bearer ${token}`,
+                  'Content-Type': 'application/json'
+                },
+                validateStatus: () => true, // Ne pas déclencher d'erreur même si 401/403
+                timeout: 2000 // Timeout court pour ne pas bloquer la déconnexion
+              }
+            ).catch(() => {
+              // Ignorer les erreurs - on continue la déconnexion de toute façon
+            });
+          }
+          
+          // Toujours nettoyer le token et l'utilisateur immédiatement
+          // (ne pas attendre la réponse de l'API de logout)
           localStorage.removeItem("token");
           localStorage.removeItem("user");
           window.dispatchEvent(new CustomEvent("authChange"));
-        } catch {
-          // no-op
-        }
-        // Redirection vers /login
-        try {
           if (typeof window !== 'undefined' && window.location) {
             window.location.href = '/login';
           }

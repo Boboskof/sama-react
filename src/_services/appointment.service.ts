@@ -57,8 +57,8 @@ const appointmentService = {
   /** Liste générale (utilise l'endpoint par défaut) */
   getAppointments: async (params: Record<string, any> = {}): Promise<RendezVous[]> => {
     try {
-      // Ajout du slash final pour éviter une redirection 301/302 (CORS) côté backend
-      const response = await Axios.get("/rendez-vous/", { params: normalizeApptParams(params) });
+      // OPTIMISATION: Utiliser sans slash final pour éviter les erreurs 502
+      const response = await Axios.get("/rendez-vous", { params: normalizeApptParams(params) });
       
       // Supporte plusieurs formats: {data: [...]}, Hydra, tableau direct
       const data = response.data;
@@ -70,15 +70,24 @@ const appointmentService = {
       const list = (listRaw as any[]).map(normalizeRdvItem);
       return list as RendezVous[];
     } catch (error) {
-      console.error('❌ Service - Erreur général:', error);
       throw error;
     }
   },
 
-  /** Formateur: rendez-vous créés par des stagiaires (pagination page/per_page) */
-  getFormateurAppointments: async (page: number = 1, perPage: number = 25): Promise<RendezVous[]> => {
+  /** Formateur: rendez-vous créés par des stagiaires (pagination page/per_page) 
+   * Utilise l'endpoint principal /api/rendez-vous qui filtre automatiquement selon le rôle
+   * Retourne { data: RendezVous[], pagination?: { total, page, per_page, total_pages } }
+   */
+  getFormateurAppointments: async (page: number = 1, perPage: number = 100): Promise<{ data: RendezVous[]; pagination?: { total: number; page: number; per_page: number; total_pages: number } }> => {
     try {
-      const response = await Axios.get('/formateur/rendez-vous', { params: { page, per_page: perPage } });
+      // Utiliser l'endpoint principal recommandé pour le formateur
+      // Le backend applique automatiquement le filtre selon le rôle (formateur voit tous)
+      const response = await Axios.get('/rendez-vous', { 
+        params: { 
+          page, 
+          per_page: perPage 
+        } 
+      });
       const data = response.data;
       const listRaw: any[] = Array.isArray(data)
         ? data
@@ -87,10 +96,72 @@ const appointmentService = {
             || []);
       
       const list = (listRaw as any[]).map(normalizeRdvItem);
-      return list as RendezVous[];
+      const pagination = data?.pagination || data?.meta || null;
+      
+      return {
+        data: list as RendezVous[],
+        pagination: pagination ? {
+          total: pagination.total || list.length,
+          page: pagination.page || pagination.current_page || page,
+          per_page: pagination.per_page || pagination.perPage || perPage,
+          total_pages: pagination.total_pages || pagination.totalPages || Math.ceil((pagination.total || list.length) / (pagination.per_page || pagination.perPage || perPage))
+        } : undefined
+      };
     } catch (error) {
-      console.error('❌ Service - Erreur formateur rendez-vous:', error);
-      return [];
+      return { data: [] };
+    }
+  },
+
+  /** Rendez-vous passés (start_at < NOW()) - Tri décroissant (plus récents en premier)
+   * Filtre automatique par rôle : formateurs voient tous, stagiaires voient les leurs
+   * Supporte pagination et filtres optionnels
+   * Retourne { data: RendezVous[], pagination?: { total, page, per_page, total_pages } }
+   */
+  getPastAppointments: async (params: {
+    page?: number;
+    per_page?: number;
+    date_debut?: string;
+    date_fin?: string;
+    patient_id?: string;
+    praticien?: string;
+    statut?: string;
+  } = {}): Promise<{ data: RendezVous[]; pagination?: { total: number; page: number; per_page: number; total_pages: number; showing_from?: number; showing_to?: number } }> => {
+    try {
+      const queryParams = new URLSearchParams();
+      if (params.page) queryParams.set('page', String(params.page));
+      if (params.per_page) queryParams.set('per_page', String(params.per_page));
+      if (params.date_debut) queryParams.set('date_debut', params.date_debut);
+      if (params.date_fin) queryParams.set('date_fin', params.date_fin);
+      if (params.patient_id) queryParams.set('patient_id', params.patient_id);
+      if (params.praticien) queryParams.set('praticien', params.praticien);
+      if (params.statut) queryParams.set('statut', params.statut);
+
+      const response = await Axios.get('/rendez-vous/passes', { 
+        params: queryParams 
+      });
+      const data = response.data;
+      const listRaw: any[] = Array.isArray(data)
+        ? data
+        : (data?.data
+            || (Array.isArray(data?.["hydra:member"]) ? data["hydra:member"] : [])
+            || []);
+      
+      const list = (listRaw as any[]).map(normalizeRdvItem);
+      const pagination = data?.pagination || data?.meta || null;
+      
+      return {
+        data: list as RendezVous[],
+        pagination: pagination ? {
+          total: pagination.total || list.length,
+          page: pagination.page || pagination.current_page || params.page || 1,
+          per_page: pagination.per_page || pagination.perPage || params.per_page || 20,
+          total_pages: pagination.total_pages || pagination.totalPages || Math.ceil((pagination.total || list.length) / (pagination.per_page || pagination.perPage || params.per_page || 20)),
+          showing_from: pagination.showing_from,
+          showing_to: pagination.showing_to
+        } : undefined
+      };
+    } catch (error) {
+      return { data: [] };
     }
   },
 
@@ -108,12 +179,11 @@ const appointmentService = {
       const list = (listRaw as any[]).map(normalizeRdvItem);
       return list as RendezVous[];
     } catch (error) {
-      console.error('❌ Service - Erreur futurs:', error);
       throw error;
     }
   },
 
-  /** Tous les rendez-vous (historique complet) - Utilise buildAppointmentParams pour la pagination */
+  /** Tous les rendez-vous (historique complet) - OPTIMISÉ: limite le nombre de pages chargées */
   getAllAppointmentsHistory: async (filters: UIAppointmentFilters = {}): Promise<RendezVous[]> => {
     try {
       // IMPORTANT : Supprimer les filtres de date pour voir TOUS les rendez-vous
@@ -121,8 +191,8 @@ const appointmentService = {
         ...filters,
         dateDebut: undefined,
         dateFin: undefined,
-        // Augmenter la limite par défaut pour récupérer plus de rendez-vous
-        limit: filters.limit || 200, // Augmenter à 200 pour récupérer plus de résultats
+        // OPTIMISATION: Limite par défaut réduite pour chargement plus rapide
+        limit: filters.limit || 30, // Réduit de 200 à 30 par défaut
         page: filters.page || 1,
       };
       
@@ -142,10 +212,6 @@ const appointmentService = {
       params.delete('skip_auto_filter'); // Non supporté par le backend
       params.delete('include_past'); // Non supporté par le backend
       
-      if (import.meta.env.DEV) {
-        console.log('📅 getAllAppointmentsHistory - Paramètres envoyés:', Object.fromEntries(params));
-      }
-      
       const response = await Axios.get("/rendez-vous/tous", { params });
       
       const data = response.data;
@@ -159,24 +225,18 @@ const appointmentService = {
       
       const pagination = data?.pagination || data?.meta || null;
       const total = pagination?.total || listRaw.length;
-      const perPage = pagination?.per_page || pagination?.perPage || cleanFilters.limit || 200;
+      const perPage = pagination?.per_page || pagination?.perPage || cleanFilters.limit || 30;
       const currentPage = pagination?.current_page || pagination?.currentPage || 1;
       const totalPages = pagination?.total_pages || pagination?.totalPages || Math.ceil(total / perPage);
       
-      if (import.meta.env.DEV) {
-        console.log(`📅 getAllAppointmentsHistory - Page ${currentPage}/${totalPages}: ${listRaw.length} rendez-vous récupérés sur ${total} total`);
-      }
-      
-      // Si on a plusieurs pages et qu'on n'a pas tout récupéré, faire des appels supplémentaires
-      if (totalPages > 1 && currentPage === 1 && listRaw.length < total) {
-        if (import.meta.env.DEV) {
-          console.log(`📅 getAllAppointmentsHistory - Récupération des pages suivantes (${totalPages - 1} pages restantes)...`);
-        }
-        
+      // OPTIMISATION: Limiter à maximum 2 pages pour éviter les appels multiples lents
+      // Si l'utilisateur a besoin de plus, il peut utiliser la pagination
+      const maxPagesToLoad = 2;
+      if (totalPages > 1 && currentPage === 1 && listRaw.length < total && totalPages <= maxPagesToLoad) {
         const allPages: Promise<any[]>[] = [Promise.resolve(listRaw)];
         
-        // Récupérer toutes les pages restantes
-        for (let page = 2; page <= totalPages; page++) {
+        // Récupérer seulement les pages suivantes (max 2 pages au total)
+        for (let page = 2; page <= Math.min(totalPages, maxPagesToLoad); page++) {
           const pageParams = buildAppointmentParams({
             ...cleanFilters,
             page,
@@ -200,7 +260,7 @@ const appointmentService = {
                   : (pageData?.data || (Array.isArray(pageData?.["hydra:member"]) ? pageData["hydra:member"] : []) || []);
               })
               .catch(err => {
-                console.warn(`⚠️ Erreur lors de la récupération de la page ${page}:`, err);
+                console.warn(`Erreur lors de la récupération de la page ${page}:`, err);
                 return [];
               })
           );
@@ -208,17 +268,12 @@ const appointmentService = {
         
         const allResults = await Promise.all(allPages);
         listRaw = allResults.flat();
-        
-        if (import.meta.env.DEV) {
-          console.log(`📅 getAllAppointmentsHistory - Total récupéré après toutes les pages: ${listRaw.length} rendez-vous`);
-        }
       }
       
       const list = (listRaw as any[]).map(normalizeRdvItem);
       
       return list as RendezVous[];
     } catch (error) {
-      console.error('❌ Service - Erreur tous:', error);
       throw error;
     }
   },
@@ -266,32 +321,24 @@ const appointmentService = {
 
   createAppointment: async (payload: Partial<RendezVous>): Promise<RendezVous> => {
     try {
-      console.debug('[RDV/SVC] create payload=', payload);
       const response = await Axios.post("/rendez-vous", payload, { headers: { 'Content-Type': 'application/json', Accept: 'application/json' } });
       
       const createdRdv = response.data as RendezVous;
-      console.debug('[RDV/SVC] create response=', createdRdv);
       
       return createdRdv;
     } catch (error) {
-      console.error('❌ Service - Erreur création RDV:', error);
-      console.error('❌ Service - Détails erreur:', (error as any).response?.data);
-      console.error('❌ Service - Status erreur:', (error as any).response?.status);
       throw error;
     }
   },
 
   updateAppointment: async (id: string | number, payload: Partial<RendezVous>): Promise<RendezVous> => {
     try {
-      console.debug('[RDV/SVC] patch id=', id, 'payload=', payload);
       const r = await Axios.patch(`/rendez-vous/${enc(id)}`, payload, mergePatchHeaders);
-      console.debug('[RDV/SVC] patch response=', r.data);
       return r.data as RendezVous;
     } catch (e: any) {
       if (e?.response?.status === 502) {
         // Retry once with JSON header in case gateway strips merge-patch
         const r2 = await Axios.patch(`/rendez-vous/${enc(id)}`, payload, { headers: { 'Content-Type': 'application/json' } });
-        console.debug('[RDV/SVC] patch retry response=', r2.data);
         return r2.data as RendezVous;
       }
       throw e;
@@ -300,6 +347,25 @@ const appointmentService = {
 
   deleteAppointment: (id: string | number): Promise<any> =>
     Axios.delete(`/rendez-vous/${enc(id)}`).then(r => r.data),
+
+  /** Suppression multiple de rendez-vous (réservé aux formateurs/admins)
+   * @param ids Array d'IDs de rendez-vous à supprimer
+   * @returns { message, deleted_count, skipped_count, requested_count, errors? }
+   */
+  bulkDeleteAppointments: async (ids: (string | number)[]): Promise<{
+    message: string;
+    deleted_count: number;
+    skipped_count: number;
+    requested_count: number;
+    errors?: string[];
+  }> => {
+    try {
+      const response = await Axios.post('/rendez-vous/bulk-delete', { ids });
+      return response.data;
+    } catch (error: any) {
+      throw error;
+    }
+  },
 
   // ----- Actions métier (PATCH merge-patch) -----
   confirmAppointment: (id: string | number): Promise<RendezVous> =>
@@ -317,7 +383,6 @@ const appointmentService = {
         return r.data as RendezVous;
       })
       .catch(error => {
-        console.error('🔍 Service - Erreur markAsAbsent:', error);
         throw error;
       });
   },

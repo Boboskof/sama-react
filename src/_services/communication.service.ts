@@ -8,7 +8,7 @@ export interface Communication {
   id: string;
   patient_id: string;
   rendez_vous_id?: string;
-  type: 'RAPPEL_RDV' | 'DEMANDE_DOC' | 'CONFIRMATION_RDV' | 'ANNULATION_RDV' | 'RESULTATS_ANALYSES' | 'RAPPEL_VACCINATION';
+  type: 'RAPPEL_RDV' | 'DEMANDE_DOC' | 'ENVOI_DOC' | 'CONFIRMATION_RDV' | 'ANNULATION_RDV' | 'RESULTATS_ANALYSES' | 'RAPPEL_VACCINATION';
   canal: 'EMAIL' | 'SMS' | 'TELEPHONE';
   sujet: string;
   contenu: string;
@@ -68,29 +68,29 @@ export const communicationService = {
       const hasExplicitCreatedBy = filters.createdBy !== undefined;
       
       if (!skipAutoFilter && !hasExplicitCreatedBy) {
-        try {
-          const userRaw = localStorage.getItem('user');
-          if (userRaw) {
-            const me = JSON.parse(userRaw);
-            const roles: string[] = me?.roles || [];
-            const isFormateur = roles.includes('ROLE_FORMATEUR') || roles.includes('ROLE_ADMIN');
-            if (!isFormateur && me?.id) {
-              const uid = String(me.id);
-              const userIri = me['@id'] || `/api/users/${me.id}`;
-              // Paramètre exact requis par l'API: created_by = UUID
-              params.set('created_by', uid);
-              // Compat éventuelle: on ajoute d'autres clés si non présentes
-              if (!params.has('createdBy.id')) params.append('createdBy.id', uid);
-              if (!params.has('creePar.id')) params.append('creePar.id', uid);
-              if (!params.has('uploadedBy.id')) params.append('uploadedBy.id', uid);
-              if (!params.has('createdBy')) params.append('createdBy', userIri);
-              if (!params.has('creePar')) params.append('creePar', userIri);
-              if (!params.has('uploadedBy')) params.append('uploadedBy', userIri);
-              if (!params.has('user')) params.append('user', userIri);
-              if (!params.has('user.id')) params.append('user.id', uid);
-            }
+      try {
+        const userRaw = localStorage.getItem('user');
+        if (userRaw) {
+          const me = JSON.parse(userRaw);
+          const roles: string[] = me?.roles || [];
+          const isFormateur = roles.includes('ROLE_FORMATEUR') || roles.includes('ROLE_ADMIN');
+          if (!isFormateur && me?.id) {
+            const uid = String(me.id);
+            const userIri = me['@id'] || `/api/users/${me.id}`;
+            // Paramètre exact requis par l'API: created_by = UUID
+            params.set('created_by', uid);
+            // Compat éventuelle: on ajoute d'autres clés si non présentes
+            if (!params.has('createdBy.id')) params.append('createdBy.id', uid);
+            if (!params.has('creePar.id')) params.append('creePar.id', uid);
+            if (!params.has('uploadedBy.id')) params.append('uploadedBy.id', uid);
+            if (!params.has('createdBy')) params.append('createdBy', userIri);
+            if (!params.has('creePar')) params.append('creePar', userIri);
+            if (!params.has('uploadedBy')) params.append('uploadedBy', userIri);
+            if (!params.has('user')) params.append('user', userIri);
+            if (!params.has('user.id')) params.append('user.id', uid);
           }
-        } catch {}
+        }
+      } catch {}
       }
       
       // Si createdBy est explicitement défini, l'utiliser
@@ -234,10 +234,14 @@ export const communicationService = {
     }
   },
 
-  // Récupérer les statistiques des communications
-  async getCommunicationStatistics(): Promise<any> {
+  // Récupérer les statistiques des communications (supporte dateDebut/dateFin côté UI)
+  async getCommunicationStatistics(filters: { dateDebut?: string; dateFin?: string } = {}): Promise<any> {
     try {
-      const response = await Axios.get('/communications/statistics');
+      const params: Record<string, string> = {};
+      if (filters.dateDebut) params.date_from = filters.dateDebut;
+      if (filters.dateFin) params.date_to = filters.dateFin;
+
+      const response = await Axios.get('/communications/statistics', { params });
       return response.data || {};
     } catch (error) {
       console.error("Erreur lors de la récupération des statistiques:", error);
@@ -302,7 +306,7 @@ export const communicationService = {
       const result = await safeGetObject<Communication>(respPromise);
       return result;
     } catch (error) {
-      console.error(`❌ Erreur lors de l'envoi de la communication ${id}:`, error);
+      console.error(`Erreur lors de l'envoi de la communication ${id}:`, error);
       throw error;
     }
   },

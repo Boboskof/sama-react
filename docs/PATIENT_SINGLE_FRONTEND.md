@@ -173,3 +173,16 @@ export default function PatientSingle() {
 
 
 
+
+
+
+
+
+
+
+
+
+
+
+
+

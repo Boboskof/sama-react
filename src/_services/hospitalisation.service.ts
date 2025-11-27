@@ -1,5 +1,5 @@
 import Axios from './caller.service';
-import { mergePatchHeaders } from './service.utils';
+import { mergePatchHeaders, unwrapList } from './service.utils';
 
 export type StatutHospitalisation =
   | 'proposed'
@@ -11,7 +11,7 @@ export type StatutHospitalisation =
 
 export interface Hospitalisation {
   id: string;
-  patient: string; // uuid
+  patient: string | { id: string; nom?: string; prenom?: string; genre?: string }; // uuid ou objet patient
   statut: StatutHospitalisation;
   motifAdministratif?: string;
   preAdmissionDate?: string;
@@ -48,10 +48,11 @@ const hospitalisationService = {
       params: q,
       validateStatus: () => true,
       headers: { 'X-Silent-Errors': '1' },
+      timeout: 30000, // OPTIMISATION: Timeout augmenté à 30 secondes
     });
     if (!resp || resp.status >= 400) return [];
     const data = resp.data;
-    return (data?.['hydra:member'] ?? data?.data ?? data ?? []) as Hospitalisation[];
+    return unwrapList<Hospitalisation>(data);
   },
 
   // Unified search endpoint (maps to /hospitalisations/search with custom params)
@@ -67,18 +68,72 @@ const hospitalisationService = {
     });
     if (!resp || resp.status >= 400) return [];
     const data = resp.data;
-    return (data?.['hydra:member'] ?? data?.data ?? data ?? []) as Hospitalisation[];
+    return unwrapList<Hospitalisation>(data);
   },
 
-  async listAll(params: Record<string, any> = {}): Promise<Hospitalisation[]> {
-    const resp = await Axios.get('/hospitalisations', {
-      params,
+  async listAll(params: Record<string, any> = {}, userId?: string | number): Promise<Hospitalisation[]> {
+    // OPTIMISATION: Utiliser l'endpoint optimisé pour éviter les timeouts
+    const optimizedParams: Record<string, any> = {
+      limit: 10, // OPTIMISATION: Limite réduite à 10 pour chargement très rapide
+      page: 1,
+      ...params
+    };
+    
+    // Si userId est fourni, filtrer par créateur
+    // API Platform accepte plusieurs formats pour le filtrage
+    if (userId) {
+      const userIdStr = String(userId);
+      const userIri = typeof userId === 'number' ? `/api/users/${userId}` : (userId.startsWith('/api/') ? userId : `/api/users/${userId}`);
+      // Ajouter plusieurs formats pour compatibilité avec API Platform
+      optimizedParams['createdBy'] = userIri;
+      optimizedParams['createdBy.id'] = userIdStr;
+      optimizedParams['created_by'] = userIdStr;
+    }
+    
+    // OPTIMISATION: Utiliser l'endpoint optimisé /hospitalisations/list au lieu de /hospitalisations
+    const resp = await Axios.get('/hospitalisations/list', {
+      params: optimizedParams,
       validateStatus: () => true,
       headers: { 'X-Silent-Errors': '1' },
+      timeout: 30000, // OPTIMISATION: Timeout augmenté à 30 secondes pour les hospitalisations
     });
-    if (!resp || resp.status >= 400) return [];
+    if (!resp || resp.status >= 400) {
+      // Fallback sur l'endpoint standard si l'optimisé n'existe pas
+      const fallbackResp = await Axios.get('/hospitalisations', {
+        params: { ...optimizedParams, 'order[createdAt]': 'desc' },
+        validateStatus: () => true,
+        headers: { 'X-Silent-Errors': '1' },
+        timeout: 30000,
+      });
+      if (!fallbackResp || fallbackResp.status >= 400) {
+        return [];
+      }
+      const fallbackData = fallbackResp.data;
+      return unwrapList<Hospitalisation>(fallbackData);
+    }
     const data = resp.data;
-    return (data?.['hydra:member'] ?? data?.data ?? data ?? []) as Hospitalisation[];
+    // L'endpoint optimisé retourne hydra:member directement
+    if (data['hydra:member']) {
+      return data['hydra:member'] as Hospitalisation[];
+    }
+    // Fallback sur unwrapList si le format est différent
+    return unwrapList<Hospitalisation>(data);
+  },
+
+  // OPTIMISATION: Méthode pour récupérer une seule hospitalisation
+  async getOne(id: string): Promise<Hospitalisation | null> {
+    try {
+      const resp = await Axios.get(`/hospitalisations/${id}`, {
+        validateStatus: () => true,
+        headers: { 'X-Silent-Errors': '1' },
+      });
+      if (!resp || resp.status >= 400) {
+        return null;
+      }
+      return resp.data as Hospitalisation;
+    } catch {
+      return null;
+    }
   },
 
   async create(payload: Partial<Hospitalisation> & { patient: string }): Promise<Hospitalisation> {
@@ -118,8 +173,12 @@ const hospitalisationService = {
     const { data } = await Axios.post(`/hospitalisations/${id}/cancel`, body);
     return data;
   },
+
+  async delete(id: string): Promise<void> {
+    const { data } = await Axios.delete(`/hospitalisations/${id}`);
+    return data;
+  },
 };
 
 export default hospitalisationService;
-
 

@@ -12,11 +12,6 @@ class StagiaireNoteService {
         params: { order }
       });
       
-      // Log de débogage pour voir la structure de la réponse
-      if (import.meta.env.DEV) {
-        console.log('📝 Réponse /api/me/notes:', response.data);
-      }
-      
       // L'endpoint retourne { data: [...], total: ... }
       // Essayer d'abord response.data.data (format standard)
       let data = response.data?.data;
@@ -31,34 +26,16 @@ class StagiaireNoteService {
         data = Array.isArray(response.data) ? response.data : null;
       }
       
-      // Log de débogage pour voir ce qui a été extrait
-      if (import.meta.env.DEV) {
-        console.log('📝 Notes extraites:', data);
-      }
-      
       return Array.isArray(data) ? data : [];
     } catch (error: any) {
       const status = error?.response?.status;
       
-      // Log de débogage pour les erreurs
-      if (import.meta.env.DEV) {
-        console.error('❌ Erreur lors de la récupération des notes (me/notes):', {
-          status,
-          url: error?.config?.url,
-          message: error?.message,
-          response: error?.response?.data
-        });
-      }
-      
-      // 403 ou 404 : retourner un tableau vide (pas d'accès ou pas de notes)
       if (status === 403 || status === 404) {
         return [];
       }
-      // 401 : laisser caller.service gérer la redirection
       if (status === 401) {
         throw error;
       }
-      console.error('❌ Erreur lors de la récupération des notes (me/notes):', error);
       return [];
     }
   }
@@ -109,7 +86,6 @@ class StagiaireNoteService {
       if (status === 401) {
         throw error;
       }
-      console.error(`❌ Erreur lors de la récupération des notes pour l'utilisateur ${userId}:`, error);
       return [];
     }
   }
@@ -138,7 +114,6 @@ class StagiaireNoteService {
       if (status === 401) {
         throw error;
       }
-      console.error(`❌ Erreur lors de la récupération de la note ${noteId}:`, error);
       throw error;
     }
   }
@@ -173,7 +148,6 @@ class StagiaireNoteService {
       if (status === 401) {
         throw error;
       }
-      console.error(`❌ Erreur lors de la création de la note pour l'utilisateur ${userId}:`, error);
       throw error;
     }
   }
@@ -200,7 +174,6 @@ class StagiaireNoteService {
       if (status === 401) {
         throw error;
       }
-      console.error(`❌ Erreur lors de la suppression de la note ${noteId}:`, error);
       throw error;
     }
   }

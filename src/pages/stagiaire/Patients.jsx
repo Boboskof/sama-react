@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import userService from '../../_services/user.service';
 import patientService from '../../_services/patient.service';
@@ -6,7 +6,10 @@ import LoadingSpinner from '../../components/LoadingSpinner';
 import SearchBar from '../../components/SearchBar';
 import SearchFilters from '../../components/SearchFilters';
 import ErrorMessage from '../../components/ErrorMessage';
-import { useSearch } from '../../hooks/useSearch';
+import StatCard from '../../components/StatCard';
+import { usePatients, usePatientStats, useAllCoverages } from '../../hooks/usePatients';
+import { formatDate } from '../../utils/dateHelpers';
+import { isMineur, isNumeroSecuValide } from '../../utils/patientHelpers';
 // import types from TS files in TS/TSX only (JSX can't import TS types at runtime)
 
 // Normalise une chaîne pour la recherche (accents/espaces/casse)
@@ -17,14 +20,6 @@ const strip = (s = '') =>
     .replace(/\p{Diacritic}/gu, '')
     .toLowerCase()
     .trim();
-
-// Affiche une date au format local FR
-const formatDate = (dateString) => {
-  if (!dateString) return '';
-  const d = new Date(dateString);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleDateString('fr-FR');
-};
 
 // Affichage robuste d'une mutuelle/assureur quelles que soient les formes renvoyées
 const displayInsurance = (insurance) => {
@@ -78,42 +73,67 @@ const getPatientStatusMeta = (statut, statutLabel) => {
 const Patients = () => {
   const navigate = useNavigate();
   const isFormateur = userService.isFormateur && userService.isFormateur();
-  const [patients, setPatients] = useState([]);
   const [couvertures, setCouvertures] = useState({});
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-  // Stats globales (back)
-  const [totalPatientsCount, setTotalPatientsCount] = useState(0);
-  const [coverageStats, setCoverageStats] = useState({ valides: 0, expirees: 0, manquantes: 0 });
+  const [uiError, setUiError] = useState(null);
   // Filtres de recherche côté API (paginés)
   const [filters, setFilters] = useState({
     search: "",
     dateDebut: undefined,
     dateFin: undefined,
     page: 1,
-    limit: 30
+    limit: 20 // Limit raisonnable (20/50 max recommandé) pour éviter de surcharger le backend
   });
-  
 
-  // Utiliser le hook de recherche
-  // Recherche serveur (hook commun)
+  // Utiliser React Query pour charger les patients
   const { 
-    query, 
-    setQuery, 
-    results: searchResults, 
-    loading: searchLoading, 
-    error: searchError, 
-    total: searchTotal 
-  } = useSearch('patients', { 
-    limit: filters.limit || 50,
-    filters: {
-      search: filters.search,
-      date_from: filters.dateDebut,
-      date_to: filters.dateFin
-    }
-  });
+    data: patientsData = [], 
+    isLoading: patientsLoading, 
+    error: patientsError,
+    isFetching: patientsFetching
+  } = usePatients(filters);
 
+  // Utiliser React Query pour charger les stats
+  const { 
+    data: statsData,
+    isLoading: statsLoading
+  } = usePatientStats();
+
+  // Utiliser React Query pour charger toutes les couvertures avec leurs statuts
+  const { 
+    data: allCoveragesData,
+    isLoading: allCoveragesLoading
+  } = useAllCoverages();
+
+  // Normaliser les patients (même logique qu'avant mais sur les données de React Query)
+  const patients = useMemo(() => {
+    return (patientsData || []).map(patient => {
+      const pid = patient.id || (patient['@id'] ? String(patient['@id']).split('/').pop() : undefined);
+      if (!pid) return null;
+      
+      return {
+        ...patient,
+        id: pid,
+        nom: patient.nom || patient.lastName,
+        prenom: patient.prenom || patient.firstName,
+        genre: patient.genre || patient.gender || patient.civilite,
+        dateNaissance: patient.dateNaissance || patient.date_naissance || patient.dateOfBirth,
+        email: patient.email,
+        telephone: patient.telephone || patient.phone,
+        statut: patient.statut || patient.status,
+        statutLabel: patient.statutLabel || patient.statut_label,
+        createdBy: patient.createdBy || patient.created_by || patient.owner || patient.utilisateur
+      };
+    }).filter(p => p !== null);
+  }, [patientsData]);
+
+  // Extraire les stats depuis le backend (PAS depuis la liste paginée)
+  // ⚠️ IMPORTANT: Les stats/exports doivent toujours venir du backend, jamais de la liste paginée
+  const totalPatientsCount = statsData?.total || 0;
+  const coverageStats = statsData?.coverage || { valides: 0, expirees: 0, manquantes: 0 };
   
+
+  // Recherche locale dans la page (sur la liste paginée actuelle)
+  const [query, setQuery] = useState('');
 
   // Boutons rapides pour les filtres
   // Raccourcis de périodes usuelles
@@ -159,94 +179,78 @@ const Patients = () => {
     }}
   ];
 
-  // Charge la liste + détails patients et leurs couvertures (séquentiel pour cohérence UI)
-  useEffect(() => {
-    const loadPatients = async () => {
-      try {
-        setLoading(true);
-        const extra = {};
-        if (filters.search) (extra).search = filters.search;
-        if (filters.dateDebut) (extra).date_from = filters.dateDebut;
-        if (filters.dateFin) (extra).date_to = filters.dateFin;
-        const list = await patientService.getPatientsPage(filters.page, filters.limit, extra);
-        
-        // Map de données complètes patient + couvertures associées
-        const mappedPatients = [];
-        const couverturesData = {};
-        
-
-        for (const patient of list) {
-          try {
-            const pid = patient.id || (patient['@id'] ? String(patient['@id']).split('/').pop() : undefined);
-            if (!pid) continue;
-            // Détails complet car la liste standard peut omettre certains champs (ex: genre)
-            const fullPatientData = await patientService.getOnePatient(pid);
-            
-            const genreVal = patient.genre || fullPatientData.genre || (patient.gender ?? fullPatientData.gender) || (patient.civilite ?? fullPatientData.civilite);
-            const mappedPatient = {
-              ...fullPatientData,
-              // Préserve le genre récupéré en liste si absents du détail
-              genre: genreVal,
-              numeroSecu: fullPatientData.numeroSecu,
-              organismeSecu: fullPatientData.organismeSecu,
-              adresseL1: fullPatientData.adresseL1,
-              adresseL2: fullPatientData.adresseL2,
-              notes: fullPatientData.notes
-            };
-            
-            mappedPatients.push(mappedPatient);
-            
-            // Couvertures (pour calculer un statut visuel rapide)
-            try {
-              const couvData = await patientService.getPatientCouvertures(String(pid));
-              couverturesData[String(pid)] = couvData;
-            } catch (error) {
-              console.error(`Erreur couvertures pour ${mappedPatient.prenom} ${mappedPatient.nom}:`, error);
-              couverturesData[String(pid)] = [];
-            }
-          } catch (error) {
-            console.error(`❌ ERREUR chargement patient ${(patient.id || patient['@id'] || 'inconnu')}:`, error);
-            // Conserver un retour explicite pour l'utilisateur
-            couverturesData[String(patient.id || '')] = [];
-          }
-        }
-        
-        setPatients(mappedPatients);
-        setCouvertures(couverturesData);
-        setError(null); // Réinitialiser l'erreur en cas de succès
-      } catch (error) {
-        console.error("Erreur lors du chargement des patients:", error);
-        setPatients([]);
-        setError(error);
-      } finally {
-        setLoading(false);
+  // Créer un map des statuts de couverture par patient ID à partir de toutes les couvertures
+  const coverageStatusMap = useMemo(() => {
+    const map = {};
+    
+    if (!allCoveragesData?.couvertures || !Array.isArray(allCoveragesData.couvertures)) {
+      return map;
+    }
+    
+    // Grouper les couvertures par patient
+    allCoveragesData.couvertures.forEach((couverture) => {
+      const patientId = couverture.patient?.id;
+      if (!patientId) return;
+      
+      const patientIdStr = String(patientId);
+      
+      if (!map[patientIdStr]) {
+        map[patientIdStr] = {
+          couvertures: []
+        };
       }
-    };
-    loadPatients();
-  }, [filters.page, filters.limit, filters.search, filters.dateDebut, filters.dateFin]);
+      
+      map[patientIdStr].couvertures.push(couverture);
+    });
+    
+    // Déterminer le statut agrégé pour chaque patient
+    Object.keys(map).forEach((patientId) => {
+      const patientData = map[patientId];
+      const couvertures = patientData.couvertures || [];
+      
+      if (couvertures.length === 0) {
+        patientData.status = 'MANQUANTE';
+        return;
+      }
+      
+      // Vérifier s'il y a au moins une couverture valide
+      const hasValid = couvertures.some(c => 
+        c.currentlyValid === true || 
+        c.statusText === 'VALIDE' || 
+        (c.isExpired === false && c.isFuture === false && c.valide !== false)
+      );
+      
+      const hasExpired = couvertures.some(c => 
+        c.isExpired === true || 
+        c.statusText === 'EXPIRÉE'
+      );
+      
+      const hasFuture = couvertures.some(c => 
+        c.isFuture === true || 
+        c.statusText === 'FUTURE'
+      );
+      
+      if (hasExpired && !hasValid) {
+        patientData.status = 'EXPIRÉE';
+      } else if (hasFuture && !hasValid) {
+        patientData.status = 'FUTURE';
+      } else if (hasValid) {
+        patientData.status = 'VALIDE';
+      } else {
+        patientData.status = 'MANQUANTE';
+      }
+    });
+    
+    return map;
+  }, [allCoveragesData]);
 
-  // Charger les stats globales depuis le back (léger et fiable)
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [stagStatus, total, cov] = await Promise.all([
-          patientService.getStagiairePatientsStatus().catch(() => ({})),
-          patientService.countAllPatients().catch(() => 0),
-          patientService.getCoverageStatus().catch(() => ({ valides: 0, expirees: 0, manquantes: 0, total: 0 }))
-        ]);
-        if (cancelled) return;
-        const myTotal = Number(stagStatus?.me?.total || 0);
-        setTotalPatientsCount(myTotal > 0 ? myTotal : Number(total || 0));
-        setCoverageStats({ valides: Number(cov.valides||0), expirees: Number(cov.expirees||0), manquantes: Number(cov.manquantes||0) });
-      } catch {}
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
+  // ⚠️ Filtre local UNIQUEMENT pour l'affichage (ne pas utiliser pour stats/exports)
+  // La recherche principale est gérée côté backend via filters.search dans usePatients()
+  // Ce filtre local est optionnel pour un affichage instantané sur la page actuelle (limit: 20 max)
   const filteredPatients = useMemo(() => {
     const q = strip(query);
     if (!q) return patients;
+    // Filtrage en mémoire sur la liste déjà paginée (max 20 items) - acceptable pour UX
     return patients.filter((p) => {
       const f = strip(p.firstName || '');
       const l = strip(p.lastName || '');
@@ -268,55 +272,66 @@ const Patients = () => {
 
   // Détermine le statut de couverture agrégé pour un patient (VALIDE/EXPIRÉE/MANQUANTE)
   const getCoverageStatus = (patientId) => {
-    const patientCouvertures = couvertures[patientId] || [];
+    const patientIdStr = String(patientId);
     
-    // Si aucune couverture
-    if (patientCouvertures.length === 0) {
-      return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
-        MANQUANTE
-      </span>;
-    }
-
-    // Calcul basé sur les dates de début/fin
-    const now = new Date();
-    let hasValid = false;
-    let hasExpired = false;
-
-  patientCouvertures.forEach(couverture => {
-    const dateDebut = couverture.dateDebut ? new Date(couverture.dateDebut) : null;
-    const dateFin = couverture.dateFin ? new Date(couverture.dateFin) : null;
-    if (dateDebut && dateFin) {
-      if (dateDebut <= now && now <= dateFin) {
-        hasValid = true;
-      } else if (dateFin < now) {
-        hasExpired = true;
+    // Vérifier dans le map des statuts
+    if (coverageStatusMap[patientIdStr]) {
+      const status = coverageStatusMap[patientIdStr].status;
+      if (status === 'EXPIRÉE') {
+        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">EXPIRÉE</span>;
+      } else if (status === 'MANQUANTE') {
+        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">MANQUANTE</span>;
       }
     }
-  });
-
-  if (hasValid) {
-    return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">VALIDE</span>;
-  }
-  return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">EXPIRÉE</span>;
-  
-};
-
-  if (loading) {
+    
+    // Si le patient a des couvertures dans le map mais pas de statut spécifique, vérifier les couvertures
+    const patientData = coverageStatusMap[patientIdStr];
+    if (patientData?.couvertures && patientData.couvertures.length > 0) {
+      // Vérifier si au moins une couverture est valide
+      const hasValid = patientData.couvertures.some(c => 
+        c.currentlyValid === true || 
+        c.statusText === 'VALIDE' || 
+        (c.isExpired === false && c.isFuture === false)
+      );
+      
+      if (hasValid) {
+        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">VALIDE</span>;
+      }
+    }
+    
+    // Si pas dans le map, on distingue le chargement en cours et l'absence de couverture
+    if (allCoveragesLoading) {
+      // Pendant le chargement, afficher un tiret neutre
+      return (
+        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+          —
+        </span>
+      );
+    }
+    
+    // Une fois le chargement terminé et si le patient n'a aucune couverture connue,
+    // on considère que la couverture est manquante (comme l'ancien comportement).
     return (
-      <div className="flex items-center justify-center h-64">
-        <LoadingSpinner message="Chargement des patients..." />
-      </div>
+      <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">
+        MANQUANTE
+      </span>
     );
-  }
+  };
+
+  // Utiliser les états de React Query
+  const loading = patientsLoading || statsLoading;
+  const error = patientsError || uiError;
 
   return (
-    <div className="space-y-6 min-h-screen p-6">
+    <div className="space-y-6 min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6">
       {/* Titre centré avec icône et description */}
       <div className="text-center py-6">
-        <div className="bg-orange-200 rounded-lg shadow p-6 max-w-xl mx-auto">
+        <div className="bg-orange-200 rounded-lg shadow p-6 max-w-2xl mx-auto">
           <div className="flex items-center justify-center gap-3 mb-2">
-            <div className="w-12 h-12 bg-orange-100 rounded-full flex items-center justify-center shadow-sm">
-              <span className="material-symbols-rounded text-orange-600 text-2xl">groups</span>
+            <div className="w-16 h-16 bg-orange-100 rounded-full flex items-center justify-center shadow-sm">
+              <svg className="w-8 h-8 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+              </svg>
             </div>
             <h1 className="text-2xl font-bold text-orange-800">Dossiers Patients</h1>
           </div>
@@ -333,147 +348,175 @@ const Patients = () => {
             message={error} 
             title="Erreur de chargement"
             dismissible={true}
-            onDismiss={() => setError(null)}
+            onDismiss={() => setUiError(null)}
           />
         </div>
       )}
 
       {/* Cartes de résumé (stats globales backend) */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <div className="bg-orange-50 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-orange-700">Total patients</p>
-              <p className="text-3xl font-bold text-orange-800">{totalPatientsCount}</p>
-            </div>
-            <div className="w-12 h-12 bg-orange-100 rounded-full flex items-center justify-center">
-              <span className="material-symbols-rounded text-orange-600">groups</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-orange-50 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-orange-700">Couvertures valides</p>
-              <p className="text-3xl font-bold text-orange-800">{coverageStats.valides}</p>
-            </div>
-            <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center">
-              <span className="material-symbols-rounded text-green-600">verified</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-orange-50 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-orange-700">Couvertures expirées</p>
-              <p className="text-3xl font-bold text-orange-800">{coverageStats.expirees}</p>
-            </div>
-            <div className="w-12 h-12 bg-red-100 rounded-full flex items-center justify-center">
-              <span className="material-symbols-rounded text-red-600">event_busy</span>
-            </div>
-          </div>
-        </div>
-
-        <div className="bg-orange-50 rounded-lg shadow p-6">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-orange-700">Sans couverture</p>
-              <p className="text-3xl font-bold text-orange-800">{coverageStats.manquantes}</p>
-            </div>
-            <div className="w-12 h-12 bg-gray-100 rounded-full flex items-center justify-center">
-              <span className="material-symbols-rounded text-gray-600">shield</span>
-            </div>
-          </div>
-        </div>
+        <StatCard
+          icon="users"
+          label="Total patients"
+          value={totalPatientsCount}
+          color="orange"
+        />
+        <StatCard
+          icon="shield"
+          label="Couvertures valides"
+          value={coverageStats.valides}
+          color="green"
+        />
+        <StatCard
+          icon="warning"
+          label="Couvertures expirées"
+          value={coverageStats.expirees}
+          color="red"
+        />
+        <StatCard
+          icon="warning"
+          label="Sans couverture"
+          value={coverageStats.manquantes}
+          color="purple"
+        />
       </div>
 
       {/* Liste des patients */}
-      <div className="bg-orange-50 rounded-lg shadow">
-        <div className="p-6 border-b border-gray-200">
+      <div className="bg-orange-50 rounded-lg shadow w-full">
+        <div className="px-3 py-4 border-b border-gray-200">
           <div className="flex items-center justify-between">
             <h3 className="text-lg font-semibold text-orange-700">Liste Patients</h3>
             <Link
               to="/patients/nouveau"
               className="bg-orange-600 text-white px-4 py-2 rounded-lg hover:bg-orange-700 transition-colors flex items-center gap-2"
             >
-              <span className="material-symbols-rounded text-white text-base">person_add</span>
+              <span className="material-symbols-rounded text-white text-2xl">person_add</span>
               Nouveau Patient
             </Link>
           </div>
         </div>
-        <div className="overflow-x-auto">
+        <div className="w-full overflow-x-auto">
           <table className="w-full">
             <thead className="bg-orange-200">
               <tr>
-                <th className="px-6 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">N°</th>
-                <th className="px-6 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Genre</th>
-                <th className="px-6 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Nom</th>
-                <th className="px-6 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Prénom</th>
-                <th className="px-6 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Date de Naissance</th>
-                <th className="px-6 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Statut</th>
-                <th className="px-6 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Statut Couverture</th>
+                <th className="px-3 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">N°</th>
+                <th className="px-3 py-3 text-center text-xs font-bold text-orange-700 uppercase tracking-wider">Genre</th>
+                <th className="px-3 py-3 text-center text-xs font-bold text-orange-700 uppercase tracking-wider">Nom</th>
+                <th className="px-3 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Prénom</th>
+                <th className="px-3 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Date de Naissance</th>
+                <th className="px-3 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Statut</th>
+                <th className="px-3 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Statut Couverture</th>
                 {isFormateur && (
-                  <th className="px-6 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Créé par</th>
+                  <th className="px-3 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Créé par</th>
                 )}
-                <th className="px-6 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Action</th>
+                <th className="px-3 py-3 text-center text-xs font-medium text-orange-700 uppercase tracking-wider">Action</th>
               </tr>
             </thead>
             <tbody className="bg-orange-50 divide-y divide-orange-200">
-              {filteredPatients.length > 0 ? (
+              {patientsLoading || patientsFetching ? (
+                <tr>
+                  <td colSpan={isFormateur ? 9 : 8} className="px-6 py-8">
+                    <LoadingSpinner color="orange" message="Chargement des patients..." />
+                  </td>
+                </tr>
+              ) : filteredPatients.length > 0 ? (
                 filteredPatients.map((patient, index) => (
                     <tr key={patient.id ?? `${patient.lastName}-${patient.firstName}-${index}`}>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm font-medium text-gray-900 text-center">
-                        {(filters.page - 1) * (filters.limit || 30) + index + 1}
+                      <td className="px-3 py-4 whitespace-nowrap text-sm font-medium text-gray-900 text-center">
+                        {(filters.page - 1) * (filters.limit || 20) + index + 1}
                       </td>
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
+                      <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
                         {(() => {
                           const raw = patient.genre || patient.gender || patient.civilite || '';
                           const val = String(raw).trim();
                           if (!val) return (
                             <span className="text-red-600 font-bold inline-flex items-center gap-1">
-                              <span className="material-symbols-rounded text-red-600 text-base">error</span>
+                              <span className="material-symbols-rounded text-red-600 text-2xl">error</span>
                               MANQUANT
                             </span>
                           );
                           const lower = val.toLowerCase();
-                          if (val === 'Mr' || val === 'M' || lower === 'homme' || lower === 'm.') return 'Mr';
-                          if (val === 'Mme' || val === 'F' || lower === 'femme' || lower === 'mme.' || lower === 'madame') return 'Mme';
+                          if (val === 'Mr' || val === 'M' || lower === 'homme' || lower === 'm.') return <span className="font-bold">Mr</span>;
+                          if (val === 'Mme' || val === 'F' || lower === 'femme' || lower === 'mme.' || lower === 'madame') return <span className="font-bold">Mme</span>;
                           return (
                             <span className="text-orange-600 font-bold inline-flex items-center gap-1">
-                              <span className="material-symbols-rounded text-orange-600 text-base">warning</span>
+                              <span className="material-symbols-rounded text-orange-600 text-2xl">warning</span>
                               {val}
                             </span>
                           );
                         })()}
                       </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
-                      {patient.nom || patient.lastName || 'N/A'}
+                    <td className="px-3 py-4 text-sm text-gray-900 text-center break-words">
+                      <span className="font-bold">{patient.nom || patient.lastName || 'N/A'}</span>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
+                    <td className="px-3 py-4 text-sm text-gray-900 text-center break-words">
                       {patient.prenom || patient.firstName || 'N/A'}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
+                    <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
                       {formatDate(patient.dateNaissance)}
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
-                      {(() => {
-                        const meta = getPatientStatusMeta(patient.statut, patient.statutLabel);
-                        if (!meta) return <span className="text-gray-500">—</span>;
-                        return (
-                          <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold ${meta.badgeClass}`}>
-                            <span>{meta.icon}</span>
-                            <span>{meta.label}</span>
-                          </span>
-                        );
-                      })()}
+                    <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
+                      <div className="flex flex-col gap-1 items-center">
+                        {(() => {
+                          const meta = getPatientStatusMeta(patient.statut, patient.statutLabel);
+                          if (!meta) return <span className="text-gray-500">—</span>;
+                          return (
+                            <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-xs font-semibold ${meta.badgeClass}`}>
+                              <span>{meta.icon}</span>
+                              <span>{meta.label}</span>
+                            </span>
+                          );
+                        })()}
+                        {/* Badges de statuts spéciaux */}
+                        {(() => {
+                          const badges = [];
+                          const dateNaissance = patient.dateNaissance || patient.date_naissance || patient.dateOfBirth;
+                          const numeroSecu = patient.numeroSecu || patient.numero_secu;
+                          const dossierComplet = patient.dossierComplet ?? true;
+                          const justificatifsManquants = patient.justificatifsManquants || [];
+                          
+                          // Badge mineur
+                          if (dateNaissance && isMineur(dateNaissance)) {
+                            badges.push(
+                              <span key="mineur" className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800 border border-blue-200" title="Patient mineur">
+                                👶 Mineur
+                              </span>
+                            );
+                          }
+                          
+                          // Badge dossier incomplet
+                          if (!dossierComplet || justificatifsManquants.length > 0) {
+                            const title = justificatifsManquants.length > 0 
+                              ? `Documents manquants: ${justificatifsManquants.join(', ')}`
+                              : 'Dossier incomplet';
+                            badges.push(
+                              <span key="dossier" className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 border border-red-200" title={title}>
+                                ⚠️ Dossier incomplet
+                              </span>
+                            );
+                          }
+                          
+                          // Badge sécu invalide
+                          if (numeroSecu && !isNumeroSecuValide(numeroSecu)) {
+                            badges.push(
+                              <span key="secu" className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 border border-yellow-200" title="Numéro de sécurité sociale invalide">
+                                ⚠️ Sécu invalide
+                              </span>
+                            );
+                          }
+                          
+                          // Ne pas afficher de badge "OK" - le statut "Actif" suffit
+                          // Afficher seulement les badges d'alerte (mineur, dossier incomplet, sécu invalide)
+                          
+                          return badges.length > 0 ? <div className="flex flex-wrap gap-1 justify-center">{badges}</div> : null;
+                        })()}
+                      </div>
                     </td>
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
+                    <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
                       {getCoverageStatus(patient.id)}
                     </td>
                     {isFormateur && (
-                      <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
+                      <td className="px-3 py-4 text-sm text-gray-900 text-center break-words">
                         {(() => {
                           const creator = patient.createdBy || patient.created_by || patient.owner || patient.utilisateur || {};
                           const fn = creator.prenom || creator.firstName || '';
@@ -484,29 +527,60 @@ const Patients = () => {
                         })()}
                       </td>
                     )}
-                    <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
+                    <td className="px-3 py-4 whitespace-nowrap text-sm text-gray-900 text-center">
                       <button 
                         onClick={() => navigate(`/patients/${patient.id}`)}
                         className="bg-orange-600 text-white px-3 py-1 rounded text-xs hover:bg-orange-700 transition-colors mr-2 inline-flex items-center gap-1"
                       >
-                        <span className="material-symbols-rounded text-white text-sm">visibility</span>
+                        <span className="material-symbols-rounded text-white text-2xl">visibility</span>
                         Voir
                       </button>
                       <button className="bg-gray-500 text-white px-3 py-1 rounded text-xs hover:bg-gray-600 transition-colors inline-flex items-center gap-1 mr-2">
-                        <span className="material-symbols-rounded text-white text-sm">edit</span>
+                        <span className="material-symbols-rounded text-white text-2xl">edit</span>
                         Modifier
                       </button>
                       {(() => {
                         const currentUser = userService.getUser && userService.getUser();
-                        const isCreator = (() => {
-                          const creator = (patient.createdBy || patient.created_by || patient.owner || patient.utilisateur || {});
-                          const cid = creator.id || (typeof creator === 'string' ? creator.split('/').pop() : undefined);
-                          return String(cid || '') === String(currentUser?.id || '');
-                        })();
-                        const canDelete = (userService.isFormateur && userService.isFormateur()) || (userService.isStagiaire && userService.isStagiaire() && isCreator);
+                        const isAdmin = userService.isAdmin && userService.isAdmin();
+                        const currentUserId = currentUser?.id;
+                        const currentUserIri = currentUser?.['@id'] || (currentUserId ? `/api/users/${currentUserId}` : null);
+                        
+                        // Fonction pour vérifier si l'utilisateur peut supprimer un patient
+                        const canDeletePatient = () => {
+                          // Formateurs et admins peuvent tout supprimer
+                          if (isFormateur || isAdmin) return true;
+                          
+                          // Stagiaires peuvent supprimer uniquement leurs propres créations
+                          if (!currentUserId || !currentUserIri) return false;
+                          
+                          const creator = patient.createdBy || patient.created_by || patient.owner || patient.utilisateur || null;
+                          if (!creator) return false;
+                          
+                          // Si creator est un objet
+                          if (typeof creator === 'object') {
+                            const creatorId = creator.id;
+                            const creatorIri = creator['@id'] || (creatorId ? `/api/users/${creatorId}` : null);
+                            return String(creatorId) === String(currentUserId) || creatorIri === currentUserIri;
+                          }
+                          
+                          // Si creator est une string (IRI)
+                          if (typeof creator === 'string') {
+                            const creatorId = creator.includes('/') ? creator.split('/').pop() : creator;
+                            return String(creatorId) === String(currentUserId) || creator === currentUserIri;
+                          }
+                          
+                          // Si creator est un nombre (ID)
+                          if (typeof creator === 'number') {
+                            return String(creator) === String(currentUserId);
+                          }
+                          
+                          return false;
+                        };
+                        
+                        const canDelete = canDeletePatient();
                         const onDelete = async () => {
                           if (!canDelete) {
-                            alert('Suppression autorisée seulement pour le formateur ou le créateur.');
+                            alert('Suppression autorisée seulement pour le formateur, l\'admin ou le créateur.');
                             return;
                           }
                           if (!confirm('Confirmer la suppression de ce patient ?')) return;
@@ -521,10 +595,10 @@ const Patients = () => {
                           <button
                             onClick={onDelete}
                             className={`px-3 py-1 rounded text-xs transition-colors inline-flex items-center gap-1 ${canDelete ? 'bg-red-600 hover:bg-red-700 text-white' : 'bg-red-200 text-red-500 cursor-not-allowed'}`}
-                            title={canDelete ? 'Supprimer' : 'Suppression autorisée seulement pour le formateur ou le créateur.'}
+                            title={canDelete ? 'Supprimer' : 'Suppression autorisée seulement pour le formateur, l\'admin ou le créateur.'}
                             disabled={!canDelete}
                           >
-                            <span className="material-symbols-rounded text-sm">delete</span>
+                            <span className="material-symbols-rounded text-2xl">delete</span>
                             Supprimer
                           </button>
                         );
@@ -534,7 +608,7 @@ const Patients = () => {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={isFormateur ? 9 : 8} className="px-6 py-8 text-center text-gray-500">
+                  <td colSpan={isFormateur ? 9 : 8} className="px-4 py-8 text-center text-gray-500">
                     {query
                       ? 'Aucun patient trouvé pour cette recherche'
                       : 'Aucun patient enregistré'}
@@ -548,7 +622,7 @@ const Patients = () => {
 
       {/* Pagination */}
       <div className="mt-4 flex items-center justify-between">
-        <div className="text-sm text-gray-600">Page {filters.page} / {Math.max(1, Math.ceil((totalPatientsCount || filteredPatients.length) / (filters.limit || 30)))}</div>
+        <div className="text-sm text-gray-600">Page {filters.page} / {Math.max(1, Math.ceil((totalPatientsCount || filteredPatients.length) / (filters.limit || 20)))}</div>
         <div className="space-x-2">
           <button
             className="px-3 py-1 border border-gray-300 rounded text-sm disabled:opacity-50"
@@ -558,7 +632,7 @@ const Patients = () => {
           <button
             className="px-3 py-1 border border-gray-300 rounded text-sm disabled:opacity-50"
             onClick={() => setFilters(f => ({ ...f, page: (f.page || 1) + 1 }))}
-            disabled={(filters.page || 1) >= Math.max(1, Math.ceil((totalPatientsCount || filteredPatients.length) / (filters.limit || 30)))}
+            disabled={(filters.page || 1) >= Math.max(1, Math.ceil((totalPatientsCount || filteredPatients.length) / (filters.limit || 20)))}
           >Suivant</button>
         </div>
       </div>

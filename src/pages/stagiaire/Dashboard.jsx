@@ -9,7 +9,10 @@ import justificatifService from "../../_services/justificatif.service";
 import LoadingSpinner from "../../components/LoadingSpinner";
 import ErrorMessage from "../../components/ErrorMessage";
 import NotesList from "../../components/NotesList";
+import PatientName from "../../components/PatientName";
 import { useTodayAppointments } from "../../hooks/useAppointments";
+import { useCoverageAlerts, usePatientStats } from "../../hooks/usePatients";
+import { formatTime, formatDate } from "../../utils/dateHelpers";
 
 const Dashboard = () => {
   // États principaux
@@ -24,20 +27,31 @@ const Dashboard = () => {
     error: appointmentsError 
   } = useTodayAppointments();
   
+  // React Query hooks pour les couvertures
+  const { 
+    data: coverageAlertsData = { manquantes: [], expirees: [] }, 
+    isLoading: coverageAlertsLoading 
+  } = useCoverageAlerts();
+  
+  const { 
+    data: patientStatsData,
+    isLoading: patientStatsLoading
+  } = usePatientStats();
+
   // États des données
-  const [coverageAlerts, setCoverageAlerts] = useState({ manquantes: [], expirees: [] });
+  const coverageAlerts = coverageAlertsData;
   // Notes du formateur
   const [notes, setNotes] = useState([]);
-  const [notesLoading, setNotesLoading] = useState(false);
+  const [notesLoading, setNotesLoading] = useState(true); // Initialiser à true pour afficher le loader
   // Médecins et sélection
   const [medecins, setMedecins] = useState([]);
   const [selectedMedecinId, setSelectedMedecinId] = useState('');
-  // Stats couvertures
-  const [coverageStats, setCoverageStats] = useState({
-    couverturesValid: 0,
-    couverturesExpired: 0,
-    couverturesToCheck: 0
-  });
+  // Stats couvertures depuis React Query
+  const coverageStats = {
+    couverturesValid: patientStatsData?.coverage?.valides || 0,
+    couverturesExpired: patientStatsData?.coverage?.expirees || 0,
+    couverturesToCheck: patientStatsData?.coverage?.manquantes || 0
+  };
   // Dossiers incomplets
   const [patientsIncomplets, setPatientsIncomplets] = useState([]);
   const [incompleteDossiers, setIncompleteDossiers] = useState(0);
@@ -45,67 +59,52 @@ const Dashboard = () => {
   const [currentPage, setCurrentPage] = useState(1);
   const patientsPerPage = 5;
 
-  // Chargement des données du dashboard
+  // OPTIMISATION: Chargement des données du dashboard avec affichage immédiat
   const loadDashboardData = async () => {
     try {
       setLoading(true);
-      // Charger l'utilisateur connecté (fallback localStorage)
+      
+      // Charger l'utilisateur connecté (fallback localStorage) - PRIORITÉ 1
       const storedUser = userService.getUser?.() || null;
       if (storedUser) {
         setUser(storedUser);
+        // Afficher immédiatement avec l'utilisateur en cache
+        setLoading(false);
       }
+      
       const currentUser = await userService.getCurrentUser().catch(() => storedUser || null);
       setUser(currentUser);
 
       if (!currentUser) {
+        setLoading(false);
         return;
       }
 
-      // Charger les données essentielles en parallèle
-      const [alerts, medecinsList, patientsIncompletsData] = await Promise.all([
-        patientService.getCoverageAlerts().catch(() => ({ manquantes: [], expirees: [] })),
-        medecinService.getAllMedecins().catch(() => []),
-        justificatifService.getPatientsIncomplets().catch(() => ({ data: [], total: 0 }))
+      // OPTIMISATION: Charger les données restantes en PARALLÈLE (couvertures gérées par React Query)
+      const [
+        medecinsList,
+        patientsIncompletsData,
+        notesList
+      ] = await Promise.allSettled([
+        medecinService.getAllMedecins(true), // silent = true pour éviter les logs répétés
+        justificatifService.getPatientsIncomplets().catch(() => ({ data: [], total: 0 })),
+        stagiaireNoteService.getMyNotes('DESC').catch(() => [])
       ]);
       
-      // Couvertures mutuelles (via endpoint de stats dédié)
-      try {
-        const s = await patientService.getCoverageStatus();
-        setCoverageStats({
-          couverturesValid: s.valides || 0,
-          couverturesExpired: s.expirees || 0,
-          couverturesToCheck: s.manquantes || 0
-        });
-      } catch {
-        // Fallback silencieux
-      }
+      // Traiter les résultats
+      const medecinsResult = medecinsList.status === 'fulfilled' ? medecinsList.value : [];
+      const patientsIncompletsResult = patientsIncompletsData.status === 'fulfilled' ? patientsIncompletsData.value : { data: [], total: 0 };
+      const notesResult = notesList.status === 'fulfilled' ? notesList.value : [];
       
-      // Charger les notes du formateur pour ce stagiaire (utilise /api/me/notes)
-      setNotesLoading(true);
-      try {
-        const notesList = await stagiaireNoteService.getMyNotes('DESC');
-        if (import.meta.env.DEV) {
-          console.log('📝 Notes chargées dans Dashboard:', notesList);
-        }
-        setNotes(Array.isArray(notesList) ? notesList : []);
-      } catch (err) {
-        console.error('❌ Erreur chargement notes dans Dashboard:', err);
-        setNotes([]);
-      } finally {
-        setNotesLoading(false);
-      }
+      // Mettre à jour les états (couvertures gérées par React Query)
+      setMedecins(Array.isArray(medecinsResult) ? medecinsResult : []);
       
-      // Mettre à jour les états
-      setCoverageAlerts({
-        manquantes: Array.isArray(alerts?.manquantes) ? alerts.manquantes : [],
-        expirees: Array.isArray(alerts?.expirees) ? alerts.expirees : [],
-      });
-      setMedecins(Array.isArray(medecinsList) ? medecinsList : []);
-      
-      // Dossiers incomplets
-      const patientsIncompletsList = Array.isArray(patientsIncompletsData?.data) ? patientsIncompletsData.data : [];
+      const patientsIncompletsList = Array.isArray(patientsIncompletsResult?.data) ? patientsIncompletsResult.data : [];
       setPatientsIncomplets(patientsIncompletsList);
-      setIncompleteDossiers(patientsIncompletsData?.total || 0);
+      setIncompleteDossiers(patientsIncompletsResult?.total || 0);
+      
+      setNotes(Array.isArray(notesResult) ? notesResult : []);
+      setNotesLoading(false);
 
     } catch (error) {
       console.error("Erreur lors du chargement des données:", error);
@@ -139,6 +138,17 @@ const Dashboard = () => {
   }, [patientsIncomplets, currentPage, patientsPerPage]);
 
   const totalPages = Math.ceil(patientsIncomplets.length / patientsPerPage);
+
+  // Fonction utilitaire pour formater le genre
+  const formatGenre = (patient) => {
+    const raw = patient?.genre || patient?.gender || patient?.civilite || '';
+    const val = String(raw).trim();
+    if (!val) return null;
+    const lower = val.toLowerCase();
+    if (val === 'Mr' || val === 'M' || lower === 'homme' || lower === 'm.') return 'Mr';
+    if (val === 'Mme' || val === 'F' || lower === 'femme' || lower === 'mme.' || lower === 'madame') return 'Mme';
+    return val;
+  };
 
   // Filtrer et trier les rendez-vous d'aujourd'hui par médecin sélectionné
   const filteredTodayAppointments = useMemo(() => {
@@ -187,29 +197,6 @@ const Dashboard = () => {
     });
   }, [todayAppointmentsData, selectedMedecinId]);
 
-
-  const formatTime = (timeString) => {
-    if (!timeString) return "";
-    const date = new Date(timeString);
-    return date.toLocaleTimeString("fr-FR", {
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  };
-
-  const formatDate = (dateString) => {
-    if (!dateString) return "";
-    const date = new Date(dateString);
-    return date.toLocaleDateString("fr-FR", {
-      day: "2-digit",
-      month: "2-digit",
-      year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  };
-
-
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -219,13 +206,15 @@ const Dashboard = () => {
   }
 
   return (
-    <div className="min-h-screen p-6">
+    <div className="min-h-screen w-[95%] md:w-[90%] lg:w-[80%] mx-auto px-2 md:px-4 py-6">
       {/* Titre centré avec icône et description */}
       <div className="text-center py-6 mb-6">
-        <div className="bg-blue-200 rounded-lg shadow p-6 max-w-xl mx-auto">
+        <div className="bg-blue-200 rounded-lg shadow p-6 max-w-2xl mx-auto">
           <div className="flex items-center justify-center gap-3 mb-2">
-            <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center shadow-sm">
-              <span className="material-symbols-rounded text-blue-600 text-2xl">dashboard</span>
+            <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center shadow-sm">
+              <svg className="w-8 h-8 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+              </svg>
             </div>
             <h1 className="text-2xl font-bold text-blue-800">Tableau de Bord</h1>
           </div>
@@ -307,50 +296,61 @@ const Dashboard = () => {
         </div>
       </div>
 
-      {/* Sections principales */}
-      <div className="grid grid-cols-1 gap-6 mb-6">
-        {/* Gestion des patients - Dossiers incomplets uniquement */}
-        <div className="bg-orange-50/90 backdrop-blur-sm rounded-lg shadow-lg border-l-4 border-orange-400">
-          <div className="p-6 border-b border-gray-200">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <span className="material-symbols-rounded text-orange-600">groups</span>
-                Gestion des patients
-              </h2>
-              <div className="flex space-x-2">
-                <Link to="/patients/nouveau" className="bg-orange-600 text-white px-3 py-1 rounded text-sm hover:bg-orange-700 shadow-sm flex items-center gap-1">
-                  <span className="material-symbols-rounded text-white text-base">person_add</span>
-                  Nouveau
-                </Link>
-                <Link to="/patients" className="bg-slate-600 text-white px-3 py-1 rounded text-sm hover:bg-slate-700 shadow-sm flex items-center gap-1">
-                  <span className="material-symbols-rounded text-white text-base">search</span>
-                  Rechercher
-                </Link>
+      {/* Gestion des patients et Couvertures mutuelles */}
+      <div className="bg-orange-50/90 backdrop-blur-sm rounded-lg shadow-lg border-l-4 border-orange-400 mb-6">
+        <div className="p-6">
+          {/* Section Gestion des patients */}
+          <div className="mb-6">
+            <div className="p-6 border-b border-gray-200 -mx-6 -mt-6 mb-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                  <span className="material-symbols-rounded text-orange-600">groups</span>
+                  Gestion des patients
+                </h2>
+                <div className="flex space-x-2">
+                  <Link to="/patients/nouveau" className="bg-orange-600 text-white px-3 py-1 rounded text-sm hover:bg-orange-700 shadow-sm flex items-center gap-1">
+                    <span className="material-symbols-rounded text-white text-2xl">person_add</span>
+                    Nouveau
+                  </Link>
+                </div>
               </div>
             </div>
-          </div>
-          <div className="p-6">
-            <div>
-              <h3 className="text-sm font-medium text-gray-900 mb-3">
-                Dossiers incomplets {incompleteDossiers > 0 && `(${incompleteDossiers})`}
-              </h3>
-              {patientsIncomplets.length === 0 ? (
-                <div className="text-center py-8">
-                  <div className="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full mb-3">
-                    <span className="material-symbols-rounded text-green-600 text-3xl">check_circle</span>
-                  </div>
-                  <p className="text-lg font-semibold text-gray-700">Tous les dossiers sont complets !</p>
-                  <p className="text-sm text-gray-500 mt-1">Aucun justificatif manquant</p>
+            {/* Statistiques Gestion des patients */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+              <div className="bg-white rounded-lg p-4 text-center border border-orange-200">
+                <p className="text-2xl font-bold text-blue-600">{patientStatsData?.total || 0}</p>
+                <p className="text-sm text-gray-600">
+                  {(patientStatsData?.total || 0) === 1 ? 'patient' : 'patients'}
+                </p>
+              </div>
+              <div className="bg-white rounded-lg p-4 text-center border border-orange-200">
+                <p className="text-2xl font-bold text-red-600">{incompleteDossiers}</p>
+                <p className="text-sm text-gray-600">
+                  {incompleteDossiers === 1 ? 'patient à corriger' : 'patients à corriger'}
+                </p>
+              </div>
+            </div>
+            <h3 className="text-sm font-medium text-gray-900 mb-3">
+              Dossiers incomplets {incompleteDossiers > 0 && `(${incompleteDossiers})`}
+            </h3>
+            {patientsIncomplets.length === 0 ? (
+              <div className="text-center py-8">
+                <div className="inline-flex items-center justify-center w-16 h-16 bg-green-100 rounded-full mb-3">
+                  <span className="material-symbols-rounded text-green-600 text-2xl">check_circle</span>
                 </div>
-              ) : (
-                <>
-                  <div className="space-y-3">
-                    {paginatedPatients.map((patient) => (
+                <p className="text-lg font-semibold text-gray-700">Tous les dossiers sont complets !</p>
+                <p className="text-sm text-gray-500 mt-1">Aucun justificatif manquant</p>
+              </div>
+            ) : (
+              <>
+                <div className="space-y-3">
+                  {paginatedPatients.map((patient) => {
+                    return (
                       <div key={patient.id} className="bg-white border-l-4 border-yellow-400 rounded-lg shadow-sm p-4">
                         <div className="flex items-start justify-between mb-2">
                           <div className="flex-1">
-                            <h4 className="text-sm font-semibold text-gray-900">
-                              {patient.prenom} {patient.nom}
+                            <h4 className="text-sm text-gray-900">
+                              <PatientName patient={patient} />
                             </h4>
                             {patient.email && (
                               <p className="text-xs text-gray-500 mt-1">{patient.email}</p>
@@ -363,12 +363,16 @@ const Dashboard = () => {
                         <div className="mt-3">
                           <p className="text-xs font-medium text-gray-700 mb-2">Justificatifs manquants :</p>
                           <ul className="space-y-1">
-                            {patient.justificatifsManquants.map((justificatif) => (
-                              <li key={justificatif.type} className="flex items-center gap-2 text-xs text-red-600">
-                                <span className="material-symbols-rounded text-base">description</span>
-                                <span>{justificatif.label}</span>
-                              </li>
-                            ))}
+                            {patient.justificatifsManquants.map((justificatif) => {
+                              // Normaliser le label : remplacer "Formulaire de contacts d'urgence" par "Contact d'urgence"
+                              const normalizedLabel = justificatif.label?.replace(/Formulaire de contacts? d'urgence/i, "Contact d'urgence") || justificatif.label;
+                              return (
+                                <li key={justificatif.type} className="flex items-center gap-2 text-xs text-red-600">
+                                  <span className="material-symbols-rounded text-2xl">description</span>
+                                  <span>{normalizedLabel}</span>
+                                </li>
+                              );
+                            })}
                           </ul>
                         </div>
                         <div className="mt-3 flex justify-end">
@@ -381,213 +385,185 @@ const Dashboard = () => {
                           </Link>
                         </div>
                       </div>
-                    ))}
-                  </div>
-                  {/* Contrôles de pagination */}
-                  {totalPages > 1 && (
-                    <div className="mt-4 flex items-center justify-between border-t border-gray-200 pt-4">
-                      <div className="text-sm text-gray-600">
-                        Page {currentPage} sur {totalPages} ({patientsIncomplets.length} patient{patientsIncomplets.length > 1 ? 's' : ''})
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
-                          disabled={currentPage === 1}
-                          className="px-3 py-1.5 text-sm font-medium text-orange-700 bg-orange-100 rounded-lg hover:bg-orange-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
-                        >
-                          <span className="material-symbols-rounded text-base">chevron_left</span>
-                          Précédent
-                        </button>
-                        <button
-                          onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
-                          disabled={currentPage === totalPages}
-                          className="px-3 py-1.5 text-sm font-medium text-orange-700 bg-orange-100 rounded-lg hover:bg-orange-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
-                        >
-                          Suivant
-                          <span className="material-symbols-rounded text-base">chevron_right</span>
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Planning des rendez-vous - Avec sélecteur de médecin */}
-        <div className="bg-pink-50/90 backdrop-blur-sm rounded-lg shadow-lg border-l-4 border-pink-400">
-          <div className="p-6 border-b border-gray-200">
-            <div className="flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-                <span className="material-symbols-rounded text-pink-600">calendar_month</span>
-                Planning des rendez-vous
-              </h2>
-            </div>
-          </div>
-          <div className="p-6">
-            {/* Sélecteur de médecin */}
-            <div className="mb-4">
-              <label className="block text-sm font-medium text-gray-700 mb-2">
-                Filtrer par médecin
-              </label>
-              <select
-                value={selectedMedecinId}
-                onChange={(e) => setSelectedMedecinId(e.target.value)}
-                className="w-full md:w-1/3 px-3 py-2 border border-pink-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-transparent bg-white"
-              >
-                <option value="">Tous les médecins</option>
-                {medecins.map((med) => (
-                  <option key={med.id} value={med.id}>
-                    Dr {med.nom?.toUpperCase() || ''} {med.prenom || ''} {med.specialite ? `— ${med.specialite}` : ''}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {/* Liste RDV du jour */}
-            <div>
-              <h3 className="text-sm font-medium text-gray-900 mb-3">
-                Rendez-vous d'aujourd'hui{selectedMedecinId ? ` (médecin sélectionné)` : ''}
-              </h3>
-              {appointmentsLoading && (
-                <div className="flex items-center justify-center py-4">
-                  <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-pink-500"></div>
-                  <span className="ml-2 text-sm text-gray-600">Chargement...</span>
-                </div>
-              )}
-              {!appointmentsLoading && (
-                <div className="space-y-3">
-                  {filteredTodayAppointments.map((rdv, index) => {
-                    const start = rdv.startAt || rdv.start_at || rdv.appointmentTime;
-                    const med = rdv.medecin || rdv.doctor || {};
-                    const medNomUpper = (med.nom || med.lastName || '').toUpperCase();
-                    const medPrenom = med.prenom || med.firstName || '';
-                    const spec = med?.specialite?.label || med?.specialite?.nom || med?.specialite || med?.specialty?.name || med?.specialty || '';
-                    const sRaw = (rdv.statut || rdv.status || '').toString().toUpperCase();
-                    const isPlan = sRaw.includes('PLAN');
-                    const isConf = sRaw.includes('CONFIRM');
-                    const isAbs = sRaw.includes('ABSEN');
-                    const isAnn = sRaw.includes('ANNU');
-                    const badgeCls = isConf
-                      ? 'bg-green-100 text-green-800'
-                      : isPlan
-                        ? 'bg-blue-100 text-blue-800'
-                        : isAbs
-                          ? 'bg-purple-100 text-purple-800'
-                          : isAnn
-                            ? 'bg-red-100 text-red-800'
-                            : 'bg-gray-100 text-gray-800';
-                    const label = isConf ? 'Confirmé' : isPlan ? 'Planifié' : isAbs ? 'Absent' : isAnn ? 'Annulé' : 'Inconnu';
-                    return (
-                      <div key={rdv.id || index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                        <div className="flex items-center space-x-3">
-                          <div className="text-sm font-medium text-gray-900">
-                            {formatTime(start)}
-                          </div>
-                          <div>
-                            <p className="text-sm font-medium text-gray-900">
-                              {rdv.patient?.prenom} {rdv.patient?.nom}
-                            </p>
-                            <p className="text-xs text-gray-500">
-                              {rdv.motif}
-                              {medNomUpper ? (
-                                <> • Dr <span className="font-extrabold">{medNomUpper}</span> <span className="font-semibold">{medPrenom}</span>{spec ? ` — ${spec}` : ''}</>
-                              ) : null}
-                            </p>
-                          </div>
-                        </div>
-                        <div className="flex space-x-2">
-                          <span className={`px-2 py-1 text-xs rounded-full ${badgeCls}`}>{label}</span>
-                        </div>
-                      </div>
                     );
                   })}
-                  {filteredTodayAppointments.length === 0 && !appointmentsLoading && (
-                    <p className="text-gray-500 text-sm text-center py-4">
-                      {selectedMedecinId ? 'Aucun rendez-vous aujourd\'hui pour ce médecin' : 'Aucun rendez-vous aujourd\'hui'}
-                    </p>
-                  )}
                 </div>
-              )}
+                {/* Contrôles de pagination */}
+                {totalPages > 1 && (
+                  <div className="mt-4 flex items-center justify-between border-t border-gray-200 pt-4">
+                    <div className="text-sm text-gray-600">
+                      Page {currentPage} sur {totalPages} ({patientsIncomplets.length} patient{patientsIncomplets.length > 1 ? 's' : ''})
+                    </div>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => setCurrentPage(prev => Math.max(1, prev - 1))}
+                        disabled={currentPage === 1}
+                        className="px-3 py-1.5 text-sm font-medium text-orange-700 bg-orange-100 rounded-lg hover:bg-orange-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
+                      >
+                        <span className="material-symbols-rounded text-2xl">chevron_left</span>
+                        Précédent
+                      </button>
+                      <button
+                        onClick={() => setCurrentPage(prev => Math.min(totalPages, prev + 1))}
+                        disabled={currentPage === totalPages}
+                        className="px-3 py-1.5 text-sm font-medium text-orange-700 bg-orange-100 rounded-lg hover:bg-orange-200 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1"
+                      >
+                        Suivant
+                        <span className="material-symbols-rounded text-2xl">chevron_right</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+
+          {/* Section Couvertures mutuelles */}
+          <div className="border-t border-gray-200 pt-6">
+            <div className="p-6 border-b border-gray-200 -mx-6 mb-6">
+              <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
+                <span className="material-symbols-rounded text-orange-600">health_and_safety</span>
+                Couvertures mutuelles
+              </h2>
+            </div>
+            {/* Statistiques couvertures: Expirées */}
+            <div className="grid grid-cols-1 gap-4 mb-6">
+              <div className="text-center">
+                <p className="text-2xl font-bold text-red-600">{coverageStats.couverturesExpired}</p>
+                <p className="text-sm text-gray-500">Expirées</p>
+              </div>
+            </div>
+
+            {/* Alertes couvertures */}
+            <div>
+              <h3 className="text-sm font-medium text-gray-900 mb-3">Alertes couvertures</h3>
+              {/* Expirées */}
+              <div>
+                <h4 className="text-sm font-semibold text-red-700 mb-2">Expirées ({coverageAlerts.expirees.length})</h4>
+                {coverageAlerts.expirees.length === 0 ? (
+                  <p className="text-xs text-gray-500">Aucune</p>
+                ) : (
+                  <ul className="space-y-2">
+                    {coverageAlerts.expirees.slice(0, 5).map((it, idx) => {
+                      const genre = formatGenre(it.patient);
+                      return (
+                        <li key={idx} className="text-sm bg-red-50 border border-red-200 rounded px-3 py-2">
+                          <div className="flex items-center justify-between">
+                            <span>
+                              <PatientName patient={it.patient} />
+                            </span>
+                            {it.patient?.id && (
+                              <Link to={`/patients/${it.patient.id}`} className="text-blue-600 hover:text-blue-800 text-xs">Ouvrir</Link>
+                            )}
+                          </div>
+                          <div className="text-xs text-gray-600 mt-1">
+                            {it.mutuelle ? `Mutuelle: ${it.mutuelle}` : ''}
+                            {it.numeroAdherent ? ` • Adhérent: ${it.numeroAdherent}` : ''}
+                            {it.dateFin ? ` • Fin: ${new Date(it.dateFin).toLocaleDateString('fr-FR')}` : ''}
+                          </div>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                )}
+              </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Couvertures mutuelles - Inchangé */}
-      <div className="bg-orange-50/90 backdrop-blur-sm rounded-lg shadow-lg border-l-4 border-orange-400 mb-6">
+      {/* Planning des rendez-vous - Avec sélecteur de médecin */}
+      <div className="bg-pink-50/90 backdrop-blur-sm rounded-lg shadow-lg border-l-4 border-pink-400 mb-6">
         <div className="p-6 border-b border-gray-200">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-gray-900 flex items-center gap-2">
-              <span className="material-symbols-rounded text-orange-600">health_and_safety</span>
-              Couvertures mutuelles
+              <span className="material-symbols-rounded text-pink-600">calendar_month</span>
+              Planning des rendez-vous
             </h2>
           </div>
         </div>
         <div className="p-6">
-          {/* Statistiques couvertures: Valides / Expirées / Manquantes */}
-          <div className="grid grid-cols-3 gap-4 mb-6">
-            <div className="text-center">
-              <p className="text-2xl font-bold text-green-600">{coverageStats.couverturesValid}</p>
-              <p className="text-sm text-gray-500">Valides</p>
-            </div>
-            <div className="text-center">
-              <p className="text-2xl font-bold text-red-600">{coverageStats.couverturesExpired}</p>
-              <p className="text-sm text-gray-500">Expirées</p>
-            </div>
-            <div className="text-center">
-              <p className="text-2xl font-bold text-yellow-600">{coverageStats.couverturesToCheck}</p>
-              <p className="text-sm text-gray-500">Manquantes</p>
-            </div>
+          {/* Sélecteur de médecin */}
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Filtrer par médecin
+            </label>
+            <select
+              value={selectedMedecinId}
+              onChange={(e) => setSelectedMedecinId(e.target.value)}
+              className="w-full md:w-1/3 px-3 py-2 border border-pink-300 rounded-lg focus:ring-2 focus:ring-pink-500 focus:border-transparent bg-white"
+            >
+              <option value="">Tous les médecins</option>
+              {medecins.map((med) => (
+                <option key={med.id} value={med.id}>
+                  Dr {med.nom?.toUpperCase() || ''} {med.prenom || ''} {med.specialite ? `— ${med.specialite}` : ''}
+                </option>
+              ))}
+            </select>
           </div>
 
-          {/* Alertes couvertures */}
+          {/* Liste RDV du jour */}
           <div>
-            <h3 className="text-sm font-medium text-gray-900 mb-3">Alertes couvertures</h3>
-            {/* Manquantes */}
-            <div className="mb-4">
-              <h4 className="text-sm font-semibold text-yellow-700 mb-2">Manquantes ({coverageAlerts.manquantes.length})</h4>
-              {coverageAlerts.manquantes.length === 0 ? (
-                <p className="text-xs text-gray-500">Aucune</p>
-              ) : (
-                <ul className="space-y-2">
-                  {coverageAlerts.manquantes.slice(0, 5).map((it, idx) => (
-                    <li key={idx} className="flex items-center justify-between text-sm bg-yellow-50 border border-yellow-200 rounded px-3 py-2">
-                      <span>{it.patient?.prenom || ''} {it.patient?.nom || ''}</span>
-                      {it.patient?.id && (
-                        <Link to={`/patients/${it.patient.id}`} className="text-blue-600 hover:text-blue-800 text-xs">Ouvrir</Link>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-            {/* Expirées */}
-            <div>
-              <h4 className="text-sm font-semibold text-red-700 mb-2">Expirées ({coverageAlerts.expirees.length})</h4>
-              {coverageAlerts.expirees.length === 0 ? (
-                <p className="text-xs text-gray-500">Aucune</p>
-              ) : (
-                <ul className="space-y-2">
-                  {coverageAlerts.expirees.slice(0, 5).map((it, idx) => (
-                    <li key={idx} className="text-sm bg-red-50 border border-red-200 rounded px-3 py-2">
-                      <div className="flex items-center justify-between">
-                        <span>{it.patient?.prenom || ''} {it.patient?.nom || ''}</span>
-                        {it.patient?.id && (
-                          <Link to={`/patients/${it.patient.id}`} className="text-blue-600 hover:text-blue-800 text-xs">Ouvrir</Link>
-                        )}
+            <h3 className="text-sm font-medium text-gray-900 mb-3">
+              Rendez-vous d'aujourd'hui{selectedMedecinId ? ` (médecin sélectionné)` : ''}
+            </h3>
+            {appointmentsLoading && (
+              <LoadingSpinner color="pink" size="small" message="Chargement..." />
+            )}
+            {!appointmentsLoading && (
+              <div className="space-y-3">
+                {filteredTodayAppointments.map((rdv, index) => {
+                  const start = rdv.startAt || rdv.start_at || rdv.appointmentTime;
+                  const med = rdv.medecin || rdv.doctor || {};
+                  const medNomUpper = (med.nom || med.lastName || '').toUpperCase();
+                  const medPrenom = med.prenom || med.firstName || '';
+                  const spec = med?.specialite?.label || med?.specialite?.nom || med?.specialite || med?.specialty?.name || med?.specialty || '';
+                  const sRaw = (rdv.statut || rdv.status || '').toString().toUpperCase();
+                  const isPlan = sRaw.includes('PLAN');
+                  const isConf = sRaw.includes('CONFIRM');
+                  const isAbs = sRaw.includes('ABSEN');
+                  const isAnn = sRaw.includes('ANNU');
+                  const badgeCls = isConf
+                    ? 'bg-green-100 text-green-800'
+                    : isPlan
+                      ? 'bg-blue-100 text-blue-800'
+                      : isAbs
+                        ? 'bg-purple-100 text-purple-800'
+                        : isAnn
+                          ? 'bg-red-100 text-red-800'
+                          : 'bg-gray-100 text-gray-800';
+                  const label = isConf ? 'Confirmé' : isPlan ? 'Planifié' : isAbs ? 'Absent' : isAnn ? 'Annulé' : 'Inconnu';
+                  return (
+                    <div key={rdv.id || index} className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
+                      <div className="flex items-center space-x-3">
+                        <div className="text-sm font-medium text-gray-900">
+                          {formatTime(start)}
+                        </div>
+                        <div>
+                          <p className="text-sm text-gray-900">
+                            <PatientName patient={rdv.patient} />
+                          </p>
+                          <p className="text-xs text-gray-500">
+                            {rdv.motif}
+                            {medNomUpper ? (
+                              <> • Dr <span className="font-extrabold">{medNomUpper}</span> <span className="font-semibold">{medPrenom}</span>{spec ? ` — ${spec}` : ''}</>
+                            ) : null}
+                          </p>
+                        </div>
                       </div>
-                      <div className="text-xs text-gray-600 mt-1">
-                        {it.mutuelle ? `Mutuelle: ${it.mutuelle}` : ''}
-                        {it.numeroAdherent ? ` • Adhérent: ${it.numeroAdherent}` : ''}
-                        {it.dateFin ? ` • Fin: ${new Date(it.dateFin).toLocaleDateString('fr-FR')}` : ''}
+                      <div className="flex space-x-2">
+                        <span className={`px-2 py-1 text-xs rounded-full ${badgeCls}`}>{label}</span>
                       </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
+                    </div>
+                  );
+                })}
+                {filteredTodayAppointments.length === 0 && !appointmentsLoading && (
+                  <p className="text-gray-500 text-sm text-center py-4">
+                    {selectedMedecinId ? 'Aucun rendez-vous aujourd\'hui pour ce médecin' : 'Aucun rendez-vous aujourd\'hui'}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
