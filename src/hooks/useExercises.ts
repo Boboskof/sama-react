@@ -59,7 +59,7 @@ export const useSubmitExerciseAssignment = () => {
       answers: Array<{ questionId: string; answer: any }>;
     }) => exerciseService.submitAssignment(params.assignmentId, params.answers),
     onSuccess: () => {
-      // Recharger la liste des exercices assignés (statut DONE, etc.)
+      // Recharger la liste des exercices assignés (statut COMPLETED, REVIEWED, etc.)
       queryClient.invalidateQueries({
         queryKey: ['exercises', 'stagiaire', 'list'],
       });

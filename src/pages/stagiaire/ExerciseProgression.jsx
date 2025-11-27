@@ -102,13 +102,15 @@ const ExerciseProgression = () => {
                       </span>
                     )}
                     <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full ${
-                      item.status === 'DONE'
+                      item.status === 'REVIEWED'
                         ? 'bg-green-50 text-green-700'
-                        : item.status === 'IN_PROGRESS'
+                        : item.status === 'COMPLETED'
                         ? 'bg-orange-50 text-orange-700'
-                        : 'bg-blue-50 text-blue-700'
+                        : item.status === 'IN_PROGRESS'
+                        ? 'bg-blue-50 text-blue-700'
+                        : 'bg-gray-50 text-gray-700'
                     }`}>
-                      {item.status === 'DONE' ? 'Terminé' : item.status === 'IN_PROGRESS' ? 'En cours' : 'À faire'}
+                      {item.status === 'REVIEWED' ? 'Corrigé' : item.status === 'COMPLETED' ? 'Terminé' : item.status === 'IN_PROGRESS' ? 'En cours' : 'À faire'}
                     </span>
                   </div>
 

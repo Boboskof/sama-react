@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { useStagiaireExercises } from '../../hooks/useExercises';
 import LoadingSpinner from '../../components/LoadingSpinner';
 import ErrorMessage from '../../components/ErrorMessage';
+import { getExerciseStatusBadgeClasses, getExerciseStatusLabel } from '../../utils/exerciseHelpers';
 
 const difficultyLabel = (d) => {
   if (d <= 1) return 'Très facile';
@@ -24,32 +25,6 @@ const typeLabel = (t) => {
       return 'Étude de document';
     default:
       return t;
-  }
-};
-
-const statusBadgeClass = (status) => {
-  switch (status) {
-    case 'ASSIGNED':
-      return 'bg-blue-100 text-blue-800';
-    case 'IN_PROGRESS':
-      return 'bg-orange-100 text-orange-800';
-    case 'DONE':
-      return 'bg-green-100 text-green-800';
-    default:
-      return 'bg-gray-100 text-gray-800';
-  }
-};
-
-const statusLabel = (status) => {
-  switch (status) {
-    case 'ASSIGNED':
-      return 'À faire';
-    case 'IN_PROGRESS':
-      return 'En cours';
-    case 'DONE':
-      return 'Terminé';
-    default:
-      return status;
   }
 };
 
@@ -130,12 +105,8 @@ const Exercises = () => {
                   <h2 className="text-base font-semibold text-gray-900">
                     {a.exercise.title}
                   </h2>
-                  <span
-                    className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${statusBadgeClass(
-                      a.status
-                    )}`}
-                  >
-                    {statusLabel(a.status)}
+                  <span className={getExerciseStatusBadgeClasses(a.status)}>
+                    {getExerciseStatusLabel(a.status)}
                   </span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600">
@@ -173,7 +144,7 @@ const Exercises = () => {
                 </div>
               </div>
               <div className="mt-4 flex justify-end gap-2">
-                {a.status === 'DONE' && (
+                {(a.status === 'COMPLETED' || a.status === 'REVIEWED') && (
                   <Link
                     to="/exercises/progression"
                     className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-emerald-600 text-white hover:bg-emerald-700 transition-colors"
@@ -187,7 +158,7 @@ const Exercises = () => {
                   className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-sky-600 text-white hover:bg-sky-700 transition-colors"
                 >
                   <span className="material-symbols-rounded text-base">play_arrow</span>
-                  {a.status === 'DONE' ? 'Revoir' : "Commencer"}
+                  {(a.status === 'COMPLETED' || a.status === 'REVIEWED') ? 'Revoir' : "Commencer"}
                 </Link>
               </div>
             </div>

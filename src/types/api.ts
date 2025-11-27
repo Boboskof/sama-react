@@ -193,7 +193,7 @@ export type Notification = {
 
 export type ExerciseType = 'QCM' | 'CAS_PRATIQUE' | 'TRANSCRIPTION' | 'ETUDE_DOCUMENT';
 
-export type ExerciseAssignmentStatus = 'ASSIGNED' | 'IN_PROGRESS' | 'DONE';
+export type ExerciseAssignmentStatus = 'ASSIGNED' | 'IN_PROGRESS' | 'COMPLETED' | 'REVIEWED';
 
 export interface ExerciseTemplateSummary {
   id: string;

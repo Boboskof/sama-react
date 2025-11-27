@@ -627,7 +627,8 @@ const ExerciseDetails = ({ exercise, onAssign }) => {
               // Supporte plusieurs formats : lastSubmission (nouveau format API), submission (ancien format), ou hasSubmission
               const submission = assignment.lastSubmission || assignment.submission;
               const hasSubmission = assignment.hasSubmission || !!submission;
-              const isDone = assignment.status === 'DONE';
+              const isCompleted = assignment.status === 'COMPLETED';
+              const isReviewed = assignment.status === 'REVIEWED';
               const isInProgress = assignment.status === 'IN_PROGRESS';
               
               return (
@@ -642,13 +643,15 @@ const ExerciseDetails = ({ exercise, onAssign }) => {
                       )}
                       <div className="mt-1 flex flex-wrap gap-2">
                         <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                          isDone
+                          isReviewed
                             ? 'bg-green-100 text-green-800'
+                            : isCompleted
+                            ? 'bg-orange-100 text-orange-800'
                             : isInProgress
                             ? 'bg-blue-100 text-blue-800'
                             : 'bg-gray-100 text-gray-800'
                         }`}>
-                          {isDone ? '✓ Terminé' : isInProgress ? '⏳ En cours' : '📋 Assigné'}
+                          {isReviewed ? '✓ Corrigé' : isCompleted ? '✅ Terminé' : isInProgress ? '✏️ En cours' : '📋 Assigné'}
                         </span>
                         {assignment.dueAt && (
                           <span className="text-xs text-gray-600">

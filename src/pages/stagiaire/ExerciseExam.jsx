@@ -33,9 +33,9 @@ const ExerciseExam = () => {
 
   // États locaux (déclarés en premier)
   const [started, setStarted] = useState(
-    assignment?.status === 'IN_PROGRESS' || assignment?.status === 'DONE',
+    assignment?.status === 'IN_PROGRESS' || assignment?.status === 'COMPLETED' || assignment?.status === 'REVIEWED',
   );
-  const [submitted, setSubmitted] = useState(assignment?.status === 'DONE');
+  const [submitted, setSubmitted] = useState(assignment?.status === 'COMPLETED' || assignment?.status === 'REVIEWED');
   const [currentIndex, setCurrentIndex] = useState(0);
   const [answers, setAnswers] = useState({});
   const [result, setResult] = useState(null);
