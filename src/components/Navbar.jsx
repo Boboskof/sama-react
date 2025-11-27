@@ -62,8 +62,8 @@ const Navbar = () => {
   ];
 
   // Liens: pour admin, afficher le lien admin en premier
-  // Pour formateur, garder un seul bouton Tableau de Bord (formateur) et retirer le dashboard général '/'
-  const filteredBaseForFormateur = baseNavItems.filter(it => it.path !== '/');
+  // Pour formateur, garder un seul bouton Tableau de Bord (formateur), retirer le dashboard général '/' et "Mes Exercices"
+  const filteredBaseForFormateur = baseNavItems.filter(it => it.path !== '/' && it.path !== '/exercises');
   let navItems;
   if (isAdmin) {
     navItems = [...adminNavItems, ...formateurNavItems, ...filteredBaseForFormateur];
